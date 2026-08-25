@@ -1,0 +1,13 @@
+[Unit]
+Description=earctl RFCOMM server for Nothing/CMF earbuds
+PartOf=graphical-session.target
+After=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/earctl server --addr 127.0.0.1:8787
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

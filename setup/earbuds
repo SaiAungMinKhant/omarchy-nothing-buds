@@ -1,0 +1,168 @@
+#!/bin/bash
+
+# Thin wrapper around earctl for the CMF Buds 2 (B179).
+#
+# Two things earctl can't do unattended on this machine:
+#   * Channel discovery needs `sdptool` (AUR bluez-utils-compat), which isn't
+#     installed. The buds answer the Nothing protocol on RFCOMM channel 16 --
+#     12/13/17/29 also accept a connection but never reply, so it's pinned.
+#   * The RFCOMM session dies whenever the buds disconnect, so every command
+#     re-establishes it first. Nothing/CMF allow ONE socket client at a time:
+#     BudsLink or ear-web will fight this server.
+
+set -uo pipefail
+
+CONF_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/earbuds
+EARCTL=${EARCTL:-$HOME/.local/bin/earctl}
+
+# Address resolution, most explicit first: environment, then a saved config
+# file, then the first paired device whose name looks like a Nothing or CMF
+# product. Auto-detection is last because a user with two pairs needs to pin
+# one, and guessing differently between calls would be worse than failing.
+detect_addr() {
+  bluetoothctl devices 2>/dev/null |
+    grep -iE 'nothing|[[:space:]]cmf|ear \(|buds' |
+    head -n 1 | awk '{print $2}'
+}
+
+ADDR=${EARBUDS_ADDR:-}
+[[ -z $ADDR && -r $CONF_DIR/address ]] && read -r ADDR <"$CONF_DIR/address"
+[[ -z $ADDR ]] && ADDR=$(detect_addr)
+
+# RFCOMM channel carrying the Nothing protocol. earctl discovers this with
+# `sdptool`, which Arch no longer ships (it lives in AUR bluez-utils-compat),
+# so it is pinned instead. 16 is correct for CMF Buds 2 (B179); other models
+# differ, and README documents how to find yours.
+CHANNEL=${EARBUDS_CHANNEL:-}
+[[ -z $CHANNEL && -r $CONF_DIR/channel ]] && read -r CHANNEL <"$CONF_DIR/channel"
+[[ -z $CHANNEL ]] && CHANNEL=16
+
+[[ -n $ADDR ]] || { echo '{"connected":false,"paired":false,"error":"no earbuds found"}'; exit 0; }
+
+bt_connected() {
+  bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Connected: yes"
+}
+
+bt_name() {
+  bluetoothctl info "$ADDR" 2>/dev/null | sed -n 's/^\s*Name: //p' | head -n 1
+}
+
+bt_paired() {
+  bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Paired: yes"
+}
+
+ensure_session() {
+  "$EARCTL" session >/dev/null 2>&1 && return 0
+  "$EARCTL" auto-connect --bluetooth-address "$ADDR" --channel "$CHANNEL" >/dev/null 2>&1
+}
+
+# One compact object for the bar widget. `connected: false` is a normal
+# state (buds in the case), not an error -- the widget hides on it.
+cmd_status() {
+  local paired=false name
+  bt_paired && paired=true
+  name=$(bt_name)
+  [[ -n $name ]] || name="Earbuds"
+
+  if ! bt_connected || ! ensure_session; then
+    jq -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'
+    return 0
+  fi
+  local anc battery latency inear
+  anc=$("$EARCTL" anc get 2>/dev/null)
+  battery=$("$EARCTL" battery 2>/dev/null)
+  # Four round trips total ~0.2s, so the panel reads everything at once
+  # rather than keeping separate poll rates per field.
+  latency=$("$EARCTL" latency get 2>/dev/null)
+  inear=$("$EARCTL" in-ear get 2>/dev/null)
+  [[ -z $anc || -z $battery ]] && { jq -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'; return 0; }
+  [[ -z $latency ]] && latency='{"low_latency_enabled":null}'
+  [[ -z $inear ]] && inear='{"detection_enabled":null}'
+  jq -cn --argjson anc "$anc" --argjson b "$battery" \
+         --argjson lat "$latency" --argjson ie "$inear" --arg n "$name" '
+    def lvl($x): if ($x | type) == "object" and ($x | has("Level"))
+                 then $x.Level.percent else null end;
+    def chg($x): if ($x | type) == "object" and ($x | has("Level"))
+                 then $x.Level.charging else false end;
+    {connected: true, paired: true, name: $n, anc: $anc,
+     left: lvl($b.left), right: lvl($b.right), case: lvl($b.case),
+     charging: (chg($b.left) or chg($b.right)),
+     low_latency: $lat.low_latency_enabled,
+     in_ear: $ie.detection_enabled}'
+}
+
+# `earctl ring` asks for an interactive y/N on stdin before playing the tone.
+# A Process spawned from QML has no stdin, so the prompt read EOF and the
+# command silently cancelled -- this is why the panel's Find button did
+# nothing. Feeding the confirmation makes it work unattended.
+cmd_ring() {
+  ensure_session || return 1
+  local side=${2:-}
+  if [[ -n $side ]]; then
+    echo y | "$EARCTL" ring --enable true --side "$side" >/dev/null 2>&1
+  else
+    echo y | "$EARCTL" ring --enable true >/dev/null 2>&1
+  fi
+}
+
+cmd_unring() {
+  ensure_session || return 1
+  "$EARCTL" ring --enable false >/dev/null 2>&1
+}
+
+cmd_connect() {
+  timeout 25 bluetoothctl connect "$ADDR" >/dev/null 2>&1
+  cmd_status
+}
+
+cmd_disconnect() {
+  "$EARCTL" disconnect >/dev/null 2>&1
+  timeout 25 bluetoothctl disconnect "$ADDR" >/dev/null 2>&1
+  cmd_status
+}
+
+# Named setters so the panel never has to know earctl's argument shapes.
+cmd_set() {
+  ensure_session || { echo '{"connected":false}'; return 0; }
+  case ${2:-} in
+    latency) "$EARCTL" latency set "${3:-false}" >/dev/null 2>&1 ;;
+    in-ear)  "$EARCTL" in-ear set "${3:-false}" >/dev/null 2>&1 ;;
+    anc)     "$EARCTL" anc set "${3:-off}" >/dev/null 2>&1 ;;
+    *)       echo "unknown setting: ${2:-}" >&2; return 1 ;;
+  esac
+  cmd_status
+}
+
+# Cycle the three modes worth having on a hotkey; the low/mid/adaptive
+# levels stay reachable via `earbuds anc set <level>`.
+cmd_cycle() {
+  ensure_session || { echo '{"connected":false}'; return 0; }
+  local now next
+  now=$("$EARCTL" anc get 2>/dev/null | tr -d '"')
+  # A read straight after a previous set sometimes comes back empty; one
+  # retry settles it. Without this the unknown-value branch below fires and
+  # the cycle appears to skip a mode.
+  [[ -z $now ]] && { sleep 0.3; now=$("$EARCTL" anc get 2>/dev/null | tr -d '"'); }
+  case $now in
+    off)                 next=transparency ;;
+    transparency)        next=nc-high ;;
+    noise_cancellation*) next=off ;;
+    # Still unreadable, or a level this cycle does not cover (low/mid/
+    # adaptive): report what is there and change nothing, rather than
+    # guessing and yanking the user out of a mode they chose deliberately.
+    *)                   cmd_status; return 0 ;;
+  esac
+  "$EARCTL" anc set "$next" >/dev/null 2>&1
+  cmd_status
+}
+
+case ${1:-status} in
+  status) cmd_status ;;
+  cycle)  cmd_cycle ;;
+  ring)   cmd_ring "$@" ;;
+  connect)    cmd_connect ;;
+  disconnect) cmd_disconnect ;;
+  unring) cmd_unring ;;
+  set)    cmd_set "$@" ;;
+  *)      ensure_session; exec "$EARCTL" "$@" ;;
+esac
