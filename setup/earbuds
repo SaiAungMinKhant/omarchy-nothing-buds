@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# Thin wrapper around earctl for the CMF Buds 2 (B179).
+# Thin wrapper around earctl for Nothing and CMF earbuds, giving the bar
+# widget one JSON-shaped command to call. Developed against CMF Buds 2 (B179);
+# other models in the family speak the same protocol but are untested.
 #
-# Two things earctl can't do unattended on this machine:
-#   * Channel discovery needs `sdptool` (AUR bluez-utils-compat), which isn't
-#     installed. The buds answer the Nothing protocol on RFCOMM channel 16 --
-#     12/13/17/29 also accept a connection but never reply, so it's pinned.
+# Two things earctl cannot do unattended:
+#   * Channel discovery needs `sdptool`, which Arch no longer ships (it lives
+#     in AUR bluez-utils-compat), so the channel is pinned below instead.
 #   * The RFCOMM session dies whenever the buds disconnect, so every command
 #     re-establishes it first. Nothing/CMF allow ONE socket client at a time:
 #     BudsLink or ear-web will fight this server.
@@ -29,10 +30,11 @@ ADDR=${EARBUDS_ADDR:-}
 [[ -z $ADDR && -r $CONF_DIR/address ]] && read -r ADDR <"$CONF_DIR/address"
 [[ -z $ADDR ]] && ADDR=$(detect_addr)
 
-# RFCOMM channel carrying the Nothing protocol. earctl discovers this with
-# `sdptool`, which Arch no longer ships (it lives in AUR bluez-utils-compat),
-# so it is pinned instead. 16 is correct for CMF Buds 2 (B179); other models
-# differ, and README documents how to find yours.
+# RFCOMM channel carrying the Nothing protocol. 16 is correct for CMF Buds 2:
+# 12, 13, 17 and 29 also accept a connection there but never answer, so it
+# cannot be found by probing for an open port alone. Other models differ --
+# README documents how to find yours, and `channel` here or EARBUDS_CHANNEL
+# overrides it.
 CHANNEL=${EARBUDS_CHANNEL:-}
 [[ -z $CHANNEL && -r $CONF_DIR/channel ]] && read -r CHANNEL <"$CONF_DIR/channel"
 [[ -z $CHANNEL ]] && CHANNEL=16
