@@ -37,6 +37,50 @@ Panel {
   // the panel says so rather than sitting silently broken.
   property bool setupOk: true
 
+  // Path to our own setup script. Resolved from this QML file rather than
+  // hardcoded so it survives the plugin folder being renamed or relocated.
+  readonly property string setupScript: {
+    var url = String(Qt.resolvedUrl("setup/install.sh"))
+    return url.indexOf("file://") === 0 ? url.substring(7) : url
+  }
+
+  // True once the silent attempt has told us earctl is the only thing left,
+  // which is the one piece of setup that may need a password.
+  property bool needsEarctl: false
+  property bool bootstrapping: false
+
+  // Bootstrap is attempted once per session. The probe keeps polling after
+  // that so the panel still notices when you install earctl yourself, but
+  // re-running the installer every four seconds would be a loop, not a fix.
+  property bool bootstrapTried: false
+
+  // setupOk only says the wrapper exists. Setup is not finished until earctl
+  // is there too, and conflating the two let the panel present a working
+  // interface over a missing dependency.
+  readonly property bool ready: setupOk && !needsEarctl
+
+  // Most of setup is a file copy and a --user systemd unit, so the plugin
+  // just does it rather than sending anyone to a terminal. install.sh exits
+  // 2 when only earctl is left, which is when a button appears.
+  function bootstrap() {
+    if (root.bootstrapping || root.bootstrapTried) return
+    root.bootstrapTried = true
+    root.bootstrapping = true
+    bootstrapProc.command = [root.setupScript]
+    bootstrapProc.running = true
+  }
+
+  // Opens a real terminal so yay can prompt for a password. Nothing else in
+  // setup needs one.
+  function installEarctl() {
+    setupRunProc.command = ["omarchy-launch-tui", root.setupScript]
+    setupRunProc.running = true
+  }
+
+  // The terminal is detached, so nothing reports back when it finishes. The
+  // probe poll below is what notices.
+  onSetupOkChanged: if (setupOk) root.needsEarctl = false
+
   // Wraps a command with any configured overrides. `env` rather than
   // Process.environment so the plugin does not depend on that API being
   // present in the installed Quickshell.
@@ -83,7 +127,7 @@ Panel {
   // hero switch reconnects them, so hiding the pill would strand it.
   // Also visible when setup is incomplete: a plugin that installs and shows
   // nothing looks broken, so the pill stays to explain itself.
-  visible: paired || !setupOk
+  visible: paired || !ready
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -156,9 +200,43 @@ Panel {
   }
 
   Process {
+    id: setupRunProc
+    stdout: StdioCollector { waitForEnd: true }
+  }
+
+  Process {
+    id: bootstrapProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      root.bootstrapping = false
+      // 2 means everything landed except earctl.
+      root.needsEarctl = exitCode === 2
+      probeProc.running = true
+    }
+  }
+
+  // While setup is unfinished, keep re-checking so the panel flips over on
+  // its own once the terminal has done its work. No signal comes back from
+  // a detached terminal, so polling is the only way to notice.
+  Timer {
+    interval: 4000
+    running: !root.setupOk
+    repeat: true
+    onTriggered: probeProc.running = true
+  }
+
+  Process {
     id: probeProc
-    command: ["bash", "-c", "command -v earbuds >/dev/null 2>&1"]
-    onExited: function(exitCode) { root.setupOk = exitCode === 0 }
+    // Both, not just the wrapper: with earctl missing the wrapper is present
+    // but useless, and checking only for it let the panel look ready over a
+    // half-finished install.
+    command: ["bash", "-c", "command -v earbuds >/dev/null 2>&1 && command -v earctl >/dev/null 2>&1"]
+    onExited: function(exitCode) {
+      root.setupOk = exitCode === 0
+      // First load on a fresh install: do the work instead of asking.
+      if (!root.setupOk) root.bootstrap()
+    }
   }
 
   Component.onCompleted: probeProc.running = true
@@ -289,7 +367,7 @@ Panel {
       }
     }
     tooltipText: root.opened ? ""
-      : (root.setupOk ? Model.summary(root.state) : "Setup required")
+      : (root.ready ? Model.summary(root.state) : "Setup required")
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.refresh()
@@ -336,7 +414,7 @@ Panel {
           title: root.state.name ? String(root.state.name) : "Earbuds"
           // "Disconnected" would be a lie before setup has run: nothing is
           // disconnected, the wrapper this reads through is simply absent.
-          meta: root.setupOk ? Model.summary(root.state) : "Setup required"
+          meta: root.ready ? Model.summary(root.state) : "Setup required"
           foreground: root.foreground
           fontFamily: root.fontFamily
           iconOpacity: root.connected ? 1.0 : 0.5
@@ -359,7 +437,7 @@ Panel {
 
               checked: root.connected
               busy: root.linking
-              interactive: root.setupOk
+              interactive: root.ready
               foreground: root.foreground
               accent: root.foreground
               onToggled: root.setLink(!root.connected)
@@ -385,19 +463,40 @@ Panel {
 
         PanelSeparator { width: parent.width; foreground: root.foreground }
 
-        Text {
-          visible: !root.setupOk
+        Column {
+          visible: !root.ready
           width: parent.width
-          text: "Setup is not finished. Run setup/install.sh from the plugin "
-              + "folder to install earctl, the earbuds wrapper, and its service."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
+          spacing: Style.space(10)
+
+          Text {
+            width: parent.width
+            text: root.bootstrapping ? "Setting things up..."
+                : (root.needsEarctl
+                    ? "Everything is installed except earctl, which talks to "
+                      + "the earbuds. Installing it may ask for your password, "
+                      + "so it needs a terminal."
+                    : "Finishing setup...")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Button {
+            visible: root.needsEarctl && !root.bootstrapping
+            width: parent.width
+            text: "Install earctl"
+            iconText: "󰇚"
+            bordered: true
+            foreground: root.foreground
+            accent: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.installEarctl()
+          }
         }
 
         Text {
-          visible: root.setupOk && !root.connected
+          visible: root.ready && !root.connected
           width: parent.width
           text: "Earbuds are disconnected. Use the switch above to connect."
           color: root.dim
@@ -407,7 +506,7 @@ Panel {
         }
 
         PanelSectionHeader {
-          visible: root.connected
+          visible: root.connected && root.ready
           text: "Noise Cancellation"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -415,7 +514,7 @@ Panel {
 
         Row {
           id: modeRow
-          visible: root.connected
+          visible: root.connected && root.ready
           width: parent.width
           spacing: Style.space(8)
 
@@ -435,7 +534,7 @@ Panel {
         // left edge under a centred mode row.
         Row {
           id: strengthRow
-          visible: root.connected && root.mode === "anc"
+          visible: root.ready && root.connected && root.mode === "anc"
           width: parent.width
           spacing: Style.space(6)
 
@@ -464,7 +563,7 @@ Panel {
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
 
         PanelSectionHeader {
-          visible: root.connected
+          visible: root.connected && root.ready
           text: "Battery"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -475,7 +574,7 @@ Panel {
         // anyone opens this panel to answer.
         Row {
           id: batteryRow
-          visible: root.connected
+          visible: root.connected && root.ready
           width: parent.width
           spacing: Style.space(8)
 
@@ -500,14 +599,14 @@ Panel {
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
 
         PanelSectionHeader {
-          visible: root.connected
+          visible: root.connected && root.ready
           text: "Playback"
           foreground: root.foreground
           fontFamily: root.fontFamily
         }
 
         Toggle {
-          visible: root.connected
+          visible: root.connected && root.ready
           width: parent.width
           label: "Low lag mode"
           description: "Lower audio delay for games"
@@ -519,7 +618,7 @@ Panel {
         }
 
         Toggle {
-          visible: root.connected
+          visible: root.connected && root.ready
           width: parent.width
           label: "In-ear detection"
           description: "Pause when a bud is removed"
@@ -541,8 +640,8 @@ Panel {
 
           Button {
             width: actionRow.buttonWidth
-            enabled: root.connected
-            opacity: root.connected ? 1.0 : 0.45
+            enabled: root.connected && root.ready
+            opacity: root.connected && root.ready ? 1.0 : 0.45
             text: ringTimer.running ? "Stop" : "Find"
             iconText: "󰂚"
             tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds"
@@ -555,8 +654,8 @@ Panel {
 
           Button {
             width: actionRow.buttonWidth
-            enabled: root.setupOk
-            opacity: root.setupOk ? 1.0 : 0.45
+            enabled: root.ready
+            opacity: root.ready ? 1.0 : 0.45
             text: "Refresh"
             iconText: "󰑐"
             bordered: true

@@ -30,14 +30,25 @@ check the [RFCOMM channel](#rfcomm-channel) first.
 
 ```sh
 omarchy plugin add https://github.com/SaiAungMinKhant/omarchy-nothing-buds.git --enable
+```
+
+That is the whole thing. On first load the plugin installs what it needs:
+the `earbuds` wrapper into `~/.local/bin` and a systemd user service that
+keeps the RFCOMM session open. Both are a file copy and a `--user` unit, so
+neither asks for a password and neither needs a terminal.
+
+The one exception is `earctl`. Installing it from the AUR can ask for a
+password, and there is nowhere to type one into a bar panel, so if it is
+missing the panel offers an "Install earctl" button that opens a terminal.
+The panel then notices on its own when it appears.
+
+You can also run the installer directly if you prefer:
+
+```sh
 ~/.config/omarchy/plugins/io.github.saiaungminkhant.nothing-buds/setup/install.sh
 ```
 
-Omarchy plugins are QML only. There is no dependency declaration and no
-post-install hook, so you run the second step by hand, once. It installs
-`earctl`, drops the `earbuds` wrapper in `~/.local/bin`, and starts a systemd
-user service that keeps the RFCOMM session open. Skip it and the panel says
-setup is unfinished rather than sitting there broken.
+Run by hand it installs earctl too, since it has a terminal to work with.
 
 ## Uninstall
 
