@@ -4,7 +4,7 @@
 // setter takes the short form ("nc-high"). Only the long form ever arrives
 // from a read, so the mapping is one-way.
 var LEVELS = {
-  "off":                            { mode: "off",    strength: "",         label: "Off" },
+  "off":                            { mode: "off",    strength: "",         label: "ANC off" },
   "transparency":                   { mode: "trans",  strength: "",         label: "Transparency" },
   "noise_cancellation_low":         { mode: "anc",    strength: "nc-low",   label: "ANC low" },
   "noise_cancellation_mid":         { mode: "anc",    strength: "nc-mid",   label: "ANC mid" },

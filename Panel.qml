@@ -320,11 +320,12 @@ Panel {
     onExited: root.busy = false
   }
 
-  // Slow while closed: battery moves over tens of minutes and every tick is
-  // an RFCOMM round trip on a socket that allows a single client. Faster
-  // while the panel is open so the readout is not visibly stale.
+  // A full read is four RFCOMM round trips and costs about 0.2s, so polling
+  // often enough that nobody reaches for a refresh button is affordable.
+  // Still slower while closed: battery moves over tens of minutes, and the
+  // socket takes one client at a time.
   Timer {
-    interval: root.opened ? 10000 : 60000
+    interval: root.opened ? 5000 : 45000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -660,47 +661,23 @@ Panel {
 
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
 
-        Row {
-          id: actionRow
+        Button {
           width: parent.width
-          spacing: Style.space(8)
-
-          readonly property real buttonWidth: (width - spacing) / 2
-
-          Button {
-            width: actionRow.buttonWidth
-            enabled: root.connected && root.ready
-            opacity: root.connected && root.ready ? 1.0 : 0.45
-            text: ringTimer.running ? "Stop" : "Find"
-            iconText: "󰂚"
-            tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds"
-            bordered: true
-            foreground: root.foreground
-            accent: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: ringTimer.running ? root.stopRing() : root.ring()
-          }
-
-          Button {
-            width: actionRow.buttonWidth
-            enabled: root.ready
-            opacity: root.ready ? 1.0 : 0.45
-            text: "Refresh"
-            iconText: "󰑐"
-            bordered: true
-            foreground: root.foreground
-            accent: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: root.refresh()
-          }
+          enabled: root.connected && root.ready
+          opacity: root.connected && root.ready ? 1.0 : 0.45
+          text: ringTimer.running ? "Stop" : "Find"
+          iconText: "󰂚"
+          tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds"
+          bordered: true
+          foreground: root.foreground
+          accent: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: ringTimer.running ? root.stopRing() : root.ring()
         }
       }
     }
   }
 
-  // Circular mode button with its label beneath, matching the Nothing X
-  // layout. The selected one inverts -- filled with the foreground, icon
-  // knocked out in the panel background -- which is how the app marks it.
   component ModeButton: Item {
     id: modeButton
 
