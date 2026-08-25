@@ -288,7 +288,8 @@ Panel {
         }
       }
     }
-    tooltipText: root.opened ? "" : Model.summary(root.state)
+    tooltipText: root.opened ? ""
+      : (root.setupOk ? Model.summary(root.state) : "Setup required")
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.refresh()
@@ -333,7 +334,9 @@ Panel {
         PanelHero {
           width: parent.width
           title: root.state.name ? String(root.state.name) : "Earbuds"
-          meta: Model.summary(root.state)
+          // "Disconnected" would be a lie before setup has run: nothing is
+          // disconnected, the wrapper this reads through is simply absent.
+          meta: root.setupOk ? Model.summary(root.state) : "Setup required"
           foreground: root.foreground
           fontFamily: root.fontFamily
           iconOpacity: root.connected ? 1.0 : 0.5
