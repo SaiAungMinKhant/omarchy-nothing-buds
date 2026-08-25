@@ -123,11 +123,11 @@ Panel {
     { value: "adaptive", label: "Adaptive" }
   ]
 
-  // Visible whenever the buds are paired, not only while connected: the
-  // hero switch reconnects them, so hiding the pill would strand it.
-  // Also visible when setup is incomplete: a plugin that installs and shows
-  // nothing looks broken, so the pill stays to explain itself.
-  visible: paired || !ready
+  // Always on the bar once enabled. Hiding until something was paired meant
+  // adding the plugin appeared to do nothing at all, which reads as broken
+  // rather than as "no earbuds yet". The pill dims instead, and the panel
+  // says which of the three states it is in.
+  visible: true
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -367,7 +367,8 @@ Panel {
       }
     }
     tooltipText: root.opened ? ""
-      : (root.ready ? Model.summary(root.state) : "Setup required")
+      : (!root.ready ? "Setup required"
+         : (root.paired ? Model.summary(root.state) : "No earbuds paired"))
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.refresh()
@@ -414,7 +415,8 @@ Panel {
           title: root.state.name ? String(root.state.name) : "Earbuds"
           // "Disconnected" would be a lie before setup has run: nothing is
           // disconnected, the wrapper this reads through is simply absent.
-          meta: root.ready ? Model.summary(root.state) : "Setup required"
+          meta: !root.ready ? "Setup required"
+              : (root.paired ? Model.summary(root.state) : "No earbuds paired")
           foreground: root.foreground
           fontFamily: root.fontFamily
           iconOpacity: root.connected ? 1.0 : 0.5
@@ -437,7 +439,7 @@ Panel {
 
               checked: root.connected
               busy: root.linking
-              interactive: root.ready
+              interactive: root.ready && root.paired
               foreground: root.foreground
               accent: root.foreground
               onToggled: root.setLink(!root.connected)
@@ -495,8 +497,35 @@ Panel {
           }
         }
 
+        Column {
+          visible: root.ready && !root.paired
+          width: parent.width
+          spacing: Style.space(10)
+
+          Text {
+            width: parent.width
+            text: "No Nothing or CMF earbuds are paired yet. Pair them once "
+                + "and this panel takes over from there."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Button {
+            width: parent.width
+            text: "Open Bluetooth"
+            iconText: "󰂯"
+            bordered: true
+            foreground: root.foreground
+            accent: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: if (root.bar) root.bar.run("omarchy-shell shell toggle omarchy.bluetooth")
+          }
+        }
+
         Text {
-          visible: root.ready && !root.connected
+          visible: root.ready && root.paired && !root.connected
           width: parent.width
           text: "Earbuds are disconnected. Use the switch above to connect."
           color: root.dim
