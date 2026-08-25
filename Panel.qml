@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
+import Quickshell.Bluetooth
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -93,15 +94,44 @@ Panel {
   property bool busy: false
   property string lastError: ""
 
-  readonly property bool connected: state && state.connected === true
+  readonly property bool connected: linkUp && state && state.connected === true
   readonly property string anc: connected && state.anc ? String(state.anc) : ""
   readonly property string mode: Model.modeOf(anc)
   readonly property string strength: Model.strengthOf(anc)
-  // Paired but not connected is the buds-in-case state: the widget stays on
-  // the bar so its switch can bring them back, rather than vanishing and
-  // leaving no way to reconnect from here.
-  readonly property bool paired: state && state.paired === true
+  // Link state comes straight from BlueZ rather than from the wrapper's
+  // status. Polling a subprocess meant a disconnect took until the next tick
+  // to show, up to 45 seconds with the panel closed; this updates the instant
+  // BlueZ does. The wrapper is still the source for ANC and battery, which
+  // have no D-Bus equivalent.
+  readonly property var btDevices: Bluetooth.devices ? Bluetooth.devices.values : []
+
+  readonly property var btDevice: {
+    var wanted = String(root.cfgAddress).toUpperCase()
+    var fallback = null
+    for (var i = 0; i < btDevices.length; i++) {
+      var d = btDevices[i]
+      if (!d) continue
+      if (wanted !== "" && String(d.address || "").toUpperCase() === wanted) return d
+      // No pinned address: take the first paired device the wrapper would
+      // also pick, matching on the same brand names.
+      if (fallback === null && d.paired && /nothing|(^|\s)cmf\s|ear \(/i.test(String(d.name || "")))
+        fallback = d
+    }
+    return wanted !== "" ? null : fallback
+  }
+
+  readonly property bool paired: btDevice !== null && btDevice.paired === true
+  readonly property string deviceName: btDevice && btDevice.name ? String(btDevice.name) : "Earbuds"
+
+  // A link that just came up still needs its RFCOMM session, so `connected`
+  // stays gated on the wrapper actually answering.
+  readonly property bool linkUp: btDevice !== null && btDevice.connected === true
   property bool linking: false
+
+  // Set when a connect attempt finished with the link still down. BlueZ
+  // fails this as br-connection-page-timeout, which means the earbuds never
+  // answered -- almost always because they are shut in their case.
+  property bool linkFailed: false
 
   readonly property bool lowLatency: connected && state.low_latency === true
   readonly property bool inEar: connected && state.in_ear === true
@@ -180,6 +210,7 @@ Panel {
 
   function setLink(on) {
     if (root.linking) return
+    root.linkFailed = false
     root.linking = true
     linkProc.command = root.cmd(["earbuds", on ? "connect" : "disconnect"])
     linkProc.running = true
@@ -241,6 +272,10 @@ Panel {
 
   Component.onCompleted: probeProc.running = true
 
+  // BlueZ tells us immediately; ask the wrapper for the details right away
+  // rather than leaving the panel stale until the next poll.
+  onLinkUpChanged: Qt.callLater(root.refresh)
+
   Process {
     id: statusProc
     command: root.cmd(["earbuds", "status"])
@@ -298,6 +333,8 @@ Panel {
     }
     onExited: {
       root.linking = false
+      // BlueZ is the authority here, and it has already settled by now.
+      root.linkFailed = !root.linkUp
       Qt.callLater(root.refresh)
     }
   }
@@ -413,7 +450,7 @@ Panel {
 
         PanelHero {
           width: parent.width
-          title: root.state.name ? String(root.state.name) : "Earbuds"
+          title: root.deviceName
           // "Disconnected" would be a lie before setup has run: nothing is
           // disconnected, the wrapper this reads through is simply absent.
           meta: !root.ready ? "Setup required"
@@ -525,14 +562,40 @@ Panel {
           }
         }
 
-        Text {
+        Column {
           visible: root.ready && root.paired && !root.connected
           width: parent.width
-          text: "Earbuds are disconnected. Use the switch above to connect."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
+          spacing: Style.space(10)
+
+          Text {
+            width: parent.width
+            // Say Bluetooth explicitly: everything below needs the link up
+            // first, and "disconnected" alone left people looking for a
+            // control in here rather than connecting the buds.
+            text: root.linkUp
+                ? "Connected over Bluetooth. Waiting for the earbuds to answer."
+                : (root.linkFailed
+                    ? "The earbuds did not answer. Take them out of the case, "
+                      + "then try the switch again."
+                    : "Connect over Bluetooth first, with the switch above or "
+                      + "from the Bluetooth panel. Everything else needs that link.")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Button {
+            visible: !root.linkUp
+            width: parent.width
+            text: "Open Bluetooth"
+            iconText: "󰂯"
+            bordered: true
+            foreground: root.foreground
+            accent: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: if (root.bar) root.bar.run("omarchy-shell shell toggle omarchy.bluetooth")
+          }
         }
 
         PanelSectionHeader {
