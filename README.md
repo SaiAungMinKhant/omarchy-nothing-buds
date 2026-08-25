@@ -39,6 +39,18 @@ post-install hook, so you run the second step by hand, once. It installs
 user service that keeps the RFCOMM session open. Skip it and the panel says
 setup is unfinished rather than sitting there broken.
 
+## Uninstall
+
+```sh
+~/.config/omarchy/plugins/io.github.saiaungminkhant.nothing-buds/setup/uninstall.sh
+omarchy plugin remove io.github.saiaungminkhant.nothing-buds
+```
+
+Run them in that order. `omarchy plugin remove` deletes the plugin folder and
+nothing else, and the uninstall script lives inside it. The script stops and
+removes the systemd service, deletes the `earbuds` wrapper and
+`~/.config/earbuds`, and leaves `earctl` alone in case something else uses it.
+
 ## Configuration
 
 The wrapper resolves your earbuds' address in this order: `EARBUDS_ADDR`,
