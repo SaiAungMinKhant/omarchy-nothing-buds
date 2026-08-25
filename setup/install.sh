@@ -18,6 +18,11 @@ bin_dir="$HOME/.local/bin"
 unit_dir="$HOME/.config/systemd/user"
 conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/earbuds"
 
+# Pinned to a full commit SHA, not a branch or tag. A tag can be moved after
+# review, which would have users building source that nobody looked at. This
+# is earctl v0.1.2.
+earctl_commit=81b24e15ffa12d04ddad957e8ac0da557e37b38d
+
 # Quiet when the plugin runs us, chatty when a person does.
 interactive() { [[ -t 0 && -t 1 ]]; }
 say() { interactive && printf '\n\033[1m%s\033[0m\n' "$*"; return 0; }
@@ -74,12 +79,25 @@ elif command -v yay >/dev/null; then
   say "Installing earctl from the AUR"
   yay -S --needed earctl || exit 2
 elif command -v cargo >/dev/null; then
-  say "Building earctl from source"
+  say "Building earctl $earctl_commit from source"
   tmp=$(mktemp -d)
-  git clone --depth 1 https://github.com/DaanHessen/earctl.git "$tmp/earctl" &&
-    (cd "$tmp/earctl" && cargo build --release) &&
+  trap 'rm -rf "$tmp"' EXIT
+
+  # Fetch exactly that commit and check it out detached, then verify HEAD is
+  # what was asked for before anything from it is compiled or run.
+  git init -q "$tmp/earctl" &&
+    git -C "$tmp/earctl" remote add origin https://github.com/DaanHessen/earctl.git &&
+    git -C "$tmp/earctl" fetch -q --depth 1 origin "$earctl_commit" &&
+    git -C "$tmp/earctl" checkout -q --detach "$earctl_commit" || exit 2
+
+  got=$(git -C "$tmp/earctl" rev-parse HEAD)
+  if [[ $got != "$earctl_commit" ]]; then
+    echo "earctl checkout is $got, expected $earctl_commit" >&2
+    exit 2
+  fi
+
+  (cd "$tmp/earctl" && cargo build --release) &&
     install -Dm755 "$tmp/earctl/target/release/earctl" "$bin_dir/earctl" || exit 2
-  rm -rf "$tmp"
 else
   echo "need either yay (AUR) or a rust toolchain to install earctl" >&2
   exit 2

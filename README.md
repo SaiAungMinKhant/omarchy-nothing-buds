@@ -27,7 +27,7 @@ check the [RFCOMM channel](#rfcomm-channel) first.
 
 | | |
 |---|---|
-| [earctl](https://github.com/DaanHessen/earctl) | Speaks the Nothing RFCOMM protocol. AGPL-3.0. This plugin calls it as a separate program over its local HTTP API and does not bundle it |
+| [earctl](https://github.com/DaanHessen/earctl) | Speaks the Nothing RFCOMM protocol. AGPL-3.0. This plugin calls it as a separate program over its local HTTP API and does not bundle it. The source-build path is pinned to the exact commit behind v0.1.2 |
 | `bluez-utils` | `bluetoothctl`, for link state and connect/disconnect |
 | `jq` | The wrapper builds its JSON output with it |
 
