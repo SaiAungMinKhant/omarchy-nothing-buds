@@ -64,7 +64,19 @@ ensure_session() {
   # Tear the dead session down first; auto-connect refuses with 409 while one
   # is still registered.
   "$EARCTL" disconnect >/dev/null 2>&1
-  "$EARCTL" auto-connect --bluetooth-address "$ADDR" --channel "$CHANNEL" >/dev/null 2>&1
+
+  # Retry, because a link that has only just come up does not accept RFCOMM
+  # immediately. One attempt made a fresh connection look like a failure:
+  # bluetoothctl reported success, the session did not open yet, and the
+  # panel showed disconnected over a perfectly good link.
+  local attempt
+  for attempt in 1 2 3 4; do
+    "$EARCTL" auto-connect --bluetooth-address "$ADDR" --channel "$CHANNEL" >/dev/null 2>&1 &&
+      "$EARCTL" anc get >/dev/null 2>&1 && return 0
+    "$EARCTL" disconnect >/dev/null 2>&1
+    sleep 0.6
+  done
+  return 1
 }
 
 # One compact object for the bar widget. `connected: false` is a normal
@@ -123,6 +135,15 @@ cmd_unring() {
 
 cmd_connect() {
   timeout 25 bluetoothctl connect "$ADDR" >/dev/null 2>&1
+
+  # bluetoothctl returns as soon as the link is up, before the earbuds are
+  # ready to talk. Give the link a moment to settle rather than reporting a
+  # failure that is really just impatience.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    bt_connected && break
+    sleep 0.3
+  done
   cmd_status
 }
 
