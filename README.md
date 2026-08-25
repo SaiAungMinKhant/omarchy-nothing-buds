@@ -5,26 +5,26 @@ bar widget.
 
 ![Preview](preview.png)
 
-- Bar pill showing the mode at a glance: a filled dot for ANC, a hollow ring
-  for transparency, drained when off or disconnected.
-- Noise control — off, transparency, and ANC at low / mid / high / adaptive.
-- Per-bud and case battery, with a meter that turns urgent below 20% and
-  pulses while charging.
+- A dot on the bar icon carries the mode. Filled for ANC, hollow for
+  transparency, drained when off or disconnected.
+- Noise control: off, transparency, and ANC at low, mid, high or adaptive.
+- Per-bud and case battery. The meter turns urgent below 20% and pulses while
+  charging.
 - Low lag mode and in-ear detection.
 - Connect and disconnect the buds from the panel header.
-- Find my buds, bounded to 8 seconds so the tone cannot be left ringing.
+- Find my buds. The tone stops itself after 8 seconds.
 
-Developed against **CMF Buds 2 (B179)**. Other Nothing and CMF models speak the
-same protocol and should work, but only that one has been tested — see
-[RFCOMM channel](#rfcomm-channel) if the panel never connects.
+Developed against CMF Buds 2 (B179). Other Nothing and CMF models speak the
+same protocol, but I have only tested that one. If the panel never connects,
+check the [RFCOMM channel](#rfcomm-channel) first.
 
 ## Requirements
 
 | | |
 |---|---|
-| [earctl](https://github.com/DaanHessen/earctl) | Talks the Nothing RFCOMM protocol. **AGPL-3.0**, used as a separate program over its local HTTP API — it is not bundled here |
+| [earctl](https://github.com/DaanHessen/earctl) | Speaks the Nothing RFCOMM protocol. AGPL-3.0. This plugin calls it as a separate program over its local HTTP API and does not bundle it |
 | `bluez-utils` | `bluetoothctl`, for link state and connect/disconnect |
-| `jq` | The wrapper composes its JSON with it |
+| `jq` | The wrapper builds its JSON output with it |
 
 ## Install
 
@@ -33,17 +33,18 @@ omarchy plugin add https://github.com/SaiAungMinKhant/omarchy-nothing-buds.git -
 ~/.config/omarchy/plugins/io.github.saiaungminkhant.nothing-buds/setup/install.sh
 ```
 
-Omarchy plugins are QML only — there is no dependency declaration or
-post-install hook — so the second step is run by hand once. It installs
-`earctl`, the `earbuds` wrapper into `~/.local/bin`, and a systemd user
-service that holds the RFCOMM session open. Until it has run, the panel says
-so instead of failing silently.
+Omarchy plugins are QML only. There is no dependency declaration and no
+post-install hook, so you run the second step by hand, once. It installs
+`earctl`, drops the `earbuds` wrapper in `~/.local/bin`, and starts a systemd
+user service that keeps the RFCOMM session open. Skip it and the panel says
+setup is unfinished rather than sitting there broken.
 
 ## Configuration
 
-The wrapper resolves your earbuds' address from, in order: `EARBUDS_ADDR`,
-`~/.config/earbuds/address`, then the first paired device whose name looks
-like a Nothing or CMF product. `install.sh` writes the config file for you.
+The wrapper resolves your earbuds' address in this order: `EARBUDS_ADDR`,
+then `~/.config/earbuds/address`, then the first paired device whose name
+looks like a Nothing or CMF product. `install.sh` writes the config file for
+you.
 
 To pin it per-widget instead, add keys to this widget's entry in
 `~/.config/omarchy/shell.json`:
@@ -54,10 +55,12 @@ To pin it per-widget instead, add keys to this widget's entry in
 
 ### RFCOMM channel
 
-earctl discovers the channel with `sdptool`, which Arch no longer ships (it
-lives in AUR `bluez-utils-compat`), so the wrapper pins **16** — correct for
-CMF Buds 2. If your model differs, find yours by probing for the channel that
-answers rather than merely accepts a connection:
+earctl finds the channel with `sdptool`. Arch no longer ships it, and it now
+lives in AUR `bluez-utils-compat`, so the wrapper pins 16 instead. That is the
+right channel for CMF Buds 2.
+
+Other models differ. Probe for the channel that *answers*, not the ones that
+merely accept a connection:
 
 ```sh
 for ch in $(seq 1 30); do
@@ -67,33 +70,38 @@ for ch in $(seq 1 30); do
 done
 ```
 
-Several channels will open and then time out; only one returns battery.
+On my buds five channels opened and four of them went quiet. Only one returned
+a battery reading.
 
 ## What is not here
 
-These are limits of earctl against this model, not of the hardware — the
-Nothing X app drives all of them:
+None of these are hardware limits. The Nothing X app drives all four on the
+same earbuds. They are gaps in earctl.
 
 | | |
 |---|---|
-| Equalizer | `eq set` returns ok but the device ignores it; it always reads back mode 0 |
-| Ultra bass | Rejected as unsupported because `earctl detect` returns `model_id: null` — B179 is not in earctl's model table |
+| Equalizer | `eq set` returns ok and the device ignores it. It always reads back mode 0 |
+| Ultra bass | Rejected as unsupported. `earctl detect` returns `model_id: null` because B179 is missing from its model table |
 | Spatial audio | No protocol opcode in earctl at all |
 | Gestures | Readable over `/api/gestures` as raw numeric codes, with no name mapping |
 
 ## Notes
 
-Only one program may hold the Nothing RFCOMM socket at a time. BudsLink,
-ear-web and this plugin will fight each other; stop the service first with
-`systemctl --user stop earctl.service`.
+Only one program can hold the Nothing RFCOMM socket at a time. BudsLink,
+ear-web and this plugin will fight over it. Stop the service before you run
+another one:
 
-## Licences
+```sh
+systemctl --user stop earctl.service
+```
 
-MIT — see [LICENSE](LICENSE).
+## Licenses
 
-Bundled [Phosphor Icons](https://phosphoricons.com) path data is MIT; its
-notice is in [licenses/phosphor-LICENSE](licenses/phosphor-LICENSE).
+MIT. See [LICENSE](LICENSE).
+
+The bundled [Phosphor Icons](https://phosphoricons.com) path data is also MIT.
+Its notice is in [licenses/phosphor-LICENSE](licenses/phosphor-LICENSE).
 
 Not affiliated with, endorsed by, or connected to Nothing Technology Limited.
-"Nothing", "CMF" and product names are their trademarks, used here only to say
-what this controls.
+"Nothing", "CMF" and the product names are their trademarks, used here only to
+say what this controls.
