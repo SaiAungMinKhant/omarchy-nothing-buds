@@ -63,9 +63,13 @@ omarchy plugin remove io.github.saiaungminkhant.nothing-buds
 ```
 
 Run them in that order. `omarchy plugin remove` deletes the plugin folder and
-nothing else, and the uninstall script lives inside it. The script stops and
-removes the systemd service, deletes the `earbuds` wrapper and
-`~/.config/earbuds`, and leaves `earctl` alone in case something else uses it.
+nothing else, and the uninstall script lives inside it.
+
+The script stops and removes the systemd service, deletes the `earbuds`
+wrapper and `~/.config/earbuds`, and removes `earctl`. It removes earctl the
+way it was installed: through the package manager if a package owns it,
+otherwise by deleting the binary. Pass `--keep-earctl` if something else on
+your system uses it.
 
 ## Configuration
 
