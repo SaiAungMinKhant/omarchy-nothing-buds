@@ -16,8 +16,8 @@ import "Model.js" as Model
 // and the popout.
 Panel {
   id: root
-  moduleName: "io.github.saiaungminkhant.earbuds"
-  ipcTarget: "io.github.saiaungminkhant.earbuds"
+  moduleName: "io.github.saiaungminkhant.nothing-buds"
+  ipcTarget: "io.github.saiaungminkhant.nothing-buds"
 
   // Last successful reading. `connected: false` is a valid answer, not a
   // failure, so it is stored like any other state.

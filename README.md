@@ -1,4 +1,4 @@
-# Earbuds
+# Nothing Buds
 
 ANC, battery and playback controls for Nothing and CMF earbuds, as an Omarchy
 bar widget.
@@ -29,8 +29,8 @@ same protocol and should work, but only that one has been tested — see
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/SaiAungMinKhant/omarchy-earbuds.git --enable
-~/.config/omarchy/plugins/io.github.saiaungminkhant.earbuds/setup/install.sh
+omarchy plugin add https://github.com/SaiAungMinKhant/omarchy-nothing-buds.git --enable
+~/.config/omarchy/plugins/io.github.saiaungminkhant.nothing-buds/setup/install.sh
 ```
 
 Omarchy plugins are QML only — there is no dependency declaration or
@@ -49,7 +49,7 @@ To pin it per-widget instead, add keys to this widget's entry in
 `~/.config/omarchy/shell.json`:
 
 ```json
-{ "id": "io.github.saiaungminkhant.earbuds", "address": "AA:BB:CC:DD:EE:FF", "channel": 16 }
+{ "id": "io.github.saiaungminkhant.nothing-buds", "address": "AA:BB:CC:DD:EE:FF", "channel": 16 }
 ```
 
 ### RFCOMM channel
