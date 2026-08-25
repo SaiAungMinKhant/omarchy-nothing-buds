@@ -3,7 +3,12 @@
 ANC, battery and playback controls for Nothing and CMF earbuds, as an Omarchy
 bar widget.
 
-![Preview](preview.png)
+<p>
+  <img src="preview.png" alt="Panel on a dark theme" width="300">
+  <img src="preview-light.png" alt="Panel on a light theme" width="300">
+</p>
+
+The panel follows your Omarchy theme; both shots are the same build.
 
 - A dot on the bar icon carries the mode. Filled for ANC, hollow for
   transparency, drained when off or disconnected.
