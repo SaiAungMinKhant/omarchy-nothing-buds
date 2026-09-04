@@ -31,29 +31,71 @@ check the [RFCOMM channel](#rfcomm-channel) first.
 | `bluez-utils` | `bluetoothctl`, for link state and connect/disconnect |
 | `jq` | The wrapper builds its JSON output with it |
 
+Dependencies are invoked by absolute path (`/usr/bin/bluetoothctl`,
+`/usr/bin/jq`, `/usr/bin/earctl` or the recorded one below, `omarchy-launch-tui`
+at `/usr/bin/omarchy-launch-tui`), never through PATH and never through an
+environment override. If your distribution puts them somewhere else, symlink
+or adjust with full knowledge of that fact.
+
 ## Install
 
 ```sh
 omarchy plugin add https://github.com/SaiAungMinKhant/omarchy-nothing-buds.git --enable
 ```
 
-That is the whole thing. On first load the plugin installs what it needs:
-the `earbuds` wrapper into `~/.local/bin` and a systemd user service that
-keeps the RFCOMM session open. Both are a file copy and a `--user` unit, so
-neither asks for a password and neither needs a terminal.
+**Setup only ever runs from a click.** Enabling the plugin never modifies
+anything by itself: the panel opens with a short list of what setup installs
+and a "Set up now" button. The click is the consent; the panel then runs
+`setup/install.sh --yes`.
 
-The one exception is `earctl`. Installing it from the AUR can ask for a
-password, and there is nowhere to type one into a bar panel, so if it is
-missing the panel offers an "Install earctl" button that opens a terminal.
-The panel then notices on its own when it appears.
+What that click installs:
 
-You can also run the installer directly if you prefer:
+- the `earbuds` wrapper into `~/.local/bin`,
+- `earctl.service`, a systemd **user** service that keeps the RFCOMM session
+  open,
+- a pinned earbuds address in `~/.config/earbuds`,
+- earctl itself, if it is not already on the machine.
+
+Nothing runs as root. earctl is the one exception to "no password": if it is
+missing, setup stops without touching anything else and the panel offers an
+"Install earctl" button that opens a terminal, where the installer prints its
+plan and asks `Proceed? [y/N]` before doing anything.
+
+Every file is written atomically (temp file + rename, never through a
+symlink), recorded in a manifest at
+`~/.local/state/io.github.saiaungminkhant.nothing-buds/`, and backed up before
+replacement. A pre-existing file that this plugin cannot prove it owns
+(manifest record, or byte-identical to a version this plugin ships or has
+shipped) is refused with exit 5 rather than overwritten; `--replace-existing`
+overrides that for a human who wants it, keeping the old copy in the
+`backup/` directory.
+
+The panel decides whether to offer setup by running `install.sh --check`,
+which exits 0 only when the wrapper is present and byte-identical to the one
+in the plugin folder, the unit exists, and earctl is found. It changes
+nothing and asks nothing.
+
+Installer exit codes: `0` done · `1` (`--check` only) missing or out of date ·
+`2` earctl missing, needs a terminal · `3` base dependency missing · `4`
+consent not given · `5` pre-existing object refused · `6` operational failure
+(everything rolled back).
+
+You can also run the installer directly:
 
 ```sh
 ~/.config/omarchy/plugins/io.github.saiaungminkhant.nothing-buds/setup/install.sh
 ```
 
-Run by hand it installs earctl too, since it has a terminal to work with.
+Run by hand it prints its plan and asks before proceeding, and installs earctl
+too, since it has a terminal to work with. A failed run rolls back everything
+it did, restoring backups.
+
+**Upgrading from before the manifest existed** (release 1.0.0): the panel
+shows "Set up now" again, because the installed wrapper is out of date. The
+installer recognises the old wrapper and unit by hash (`NB_SHIPPED_SHAS` in
+`setup/lib.sh`), so the click replaces them with backups and records a
+manifest; your pinned address and any earctl already on the machine are left
+as they are and marked pre-existing, so a later uninstall will not touch them.
 
 ## Uninstall
 
@@ -65,25 +107,44 @@ omarchy plugin remove io.github.saiaungminkhant.nothing-buds
 Run them in that order. `omarchy plugin remove` deletes the plugin folder and
 nothing else, and the uninstall script lives inside it.
 
-The script stops and removes the systemd service, deletes the `earbuds`
-wrapper and `~/.config/earbuds`, and removes `earctl`. It removes earctl the
-way it was installed: through the package manager if a package owns it,
-otherwise by deleting the binary. Pass `--keep-earctl` if something else on
-your system uses it.
+The uninstall is manifest-driven: it removes exactly the objects recorded at
+install time, and only while they are still provably ours — same recorded
+hash, not currently a symlink. Files you edited are left alone, directories
+are removed only when empty, and an earctl this plugin never installed is
+never touched. The manifest itself and the backups go too.
+
+earctl goes the way it came: the AUR package through the package manager
+(`yay -Rns`, the one step that may ask for a password), or the built binary
+by exact recorded path. Pass `--keep-earctl` if something else on your system
+uses it.
+
+Installs made before the manifest existed get the safe subset: only the
+wrapper and unit are removed, and only if their content still matches a
+version this plugin ships or has shipped. Everything else is listed for manual
+cleanup.
 
 ## Configuration
 
-The wrapper resolves your earbuds' address in this order: `EARBUDS_ADDR`,
-then `~/.config/earbuds/address`, then the first paired device whose name
-looks like a Nothing or CMF product. `install.sh` writes the config file for
-you.
+The wrapper resolves your earbuds' address in this order: `--address`, then
+`~/.config/earbuds/address`, then the first paired device whose name looks
+like a Nothing or CMF product. `install.sh` writes the config file for you.
+The RFCOMM channel resolves the same way (`--channel`, then
+`~/.config/earbuds/channel`, else 16). Values are validated — an address must
+match `AA:BB:CC:DD:EE:FF`, a channel must be 1–63 — and anything that fails is
+ignored with a note rather than passed to a command.
 
-To pin it per-widget instead, add keys to this widget's entry in
+To pin per-widget instead, add keys to this widget's entry in
 `~/.config/omarchy/shell.json`:
 
 ```json
 { "id": "io.github.saiaungminkhant.nothing-buds", "address": "AA:BB:CC:DD:EE:FF", "channel": 16 }
 ```
+
+The panel validates these too and shows "Ignoring invalid address/channel in
+shell.json" if one fails the grammar, instead of building a command with them.
+The `EARBUDS_ADDR`, `EARBUDS_CHANNEL` and `EARCTL` environment variables from
+the first release are gone: an environment variable is an executable/input
+steering mechanism this plugin no longer has.
 
 ### RFCOMM channel
 
@@ -116,6 +177,20 @@ same earbuds. They are gaps in earctl.
 | Ultra bass | Rejected as unsupported. `earctl detect` returns `model_id: null` because B179 is missing from its model table |
 | Spatial audio | No protocol opcode in earctl at all |
 | Gestures | Readable over `/api/gestures` as raw numeric codes, with no name mapping |
+
+## Security
+
+The marketplace review asked for four things, and this is where each lives:
+
+| Requirement | Mechanism |
+|---|---|
+| Setup must be an explicit, consented action; no overwriting objects the plugin cannot prove it owns | Setup runs only from the panel's "Set up" click (`--yes`) or a y/N prompt in a terminal. `setup/lib.sh` installs through `nb_install_file`: symlinked targets are refused, pre-existing files are refused unless recorded in the manifest or byte-identical to a version shipped here, replaced files are backed up, and everything is published by atomic rename. The panel only ever probes with `install.sh --check`, which is read-only. `bash setup/test.sh` S1, S6, S7, S9, S15, S16 |
+| Uninstall must remove only what this installation created | A manifest at `~/.local/state/io.github.saiaungminkhant.nothing-buds/` records every file, directory and package created. Removal is hash-checked, symlink-checked, empty-dir-only, and never recurses by inference. Legacy installs get content-matching only. S3, S8, S11, S12 |
+| Helper calls need deadlines and output caps; a hung or noisy helper must not wedge the panel | Every wrapper call is wrapped in `/usr/bin/timeout` with byte caps on consumed output, and each helper runs in its own process group so a forked grandchild dies with it; the panel wraps every operation in `/usr/bin/timeout --kill-after=5 <deadline>`, streams stdout/stderr through capped parsers, and a watchdog plus supersession rules guarantee `busy`/link state always clears. S13 |
+| Executable identity and input boundaries must not be steerable | All binaries are invoked by absolute path; the `EARCTL`/`EARBUDS_ADDR`/`EARBUDS_CHANNEL` overrides are removed; the panel passes overrides as validated arguments; config files are read bounded, without following symlinks, and validated against a Bluetooth-address grammar before use. S14 |
+
+`setup/test.sh` runs all of this against fakes in a throwaway HOME — no root,
+no network, no real systemd — and is the evidence for the table above.
 
 ## Notes
 

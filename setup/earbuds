@@ -1,107 +1,243 @@
 #!/bin/bash
 
-# Thin wrapper around earctl for Nothing and CMF earbuds, giving the bar
-# widget one JSON-shaped command to call. Developed against CMF Buds 2 (B179);
-# other models in the family speak the same protocol but are untested.
+# Wrapper around earctl for Nothing/CMF earbuds: one JSON-shaped command for
+# the bar widget. Developed against CMF Buds 2 (B179).
 #
-# Two things earctl cannot do unattended:
-#   * Channel discovery needs `sdptool`, which Arch no longer ships (it lives
-#     in AUR bluez-utils-compat), so the channel is pinned below instead.
-#   * The RFCOMM session dies whenever the buds disconnect, so every command
-#     re-establishes it first. Nothing/CMF allow ONE socket client at a time:
-#     BudsLink or ear-web will fight this server.
+# Self-contained: install.sh copies only this file to ~/.local/bin, so the
+# absolute paths below mirror setup/lib.sh (test.sh rewrites both). No PATH
+# lookup or environment variable selects an executable.
+#
+# earctl quirks handled here: channel discovery needs sdptool (not on Arch),
+# so the channel defaults to 16; the RFCOMM session dies on disconnect, so
+# every command re-establishes it; only ONE socket client is allowed, so
+# BudsLink or ear-web will fight this; `ring` wants an interactive y/N.
+#
+# Every external call has a deadline (/usr/bin/timeout) and a byte cap. The
+# inner timeouts do not use --foreground, so each helper gets its own process
+# group and a forked grandchild dies with it instead of holding the pipe
+# open. The panel's outer timeout kills the wrapper; helpers still in flight
+# end at their own shorter deadlines.
 
 set -uo pipefail
 
-CONF_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/earbuds
-EARCTL=${EARCTL:-$HOME/.local/bin/earctl}
+NB_BT=/usr/bin/bluetoothctl
+NB_JQ=/usr/bin/jq
+NB_TIMEOUT=/usr/bin/timeout
+NB_HEAD=/usr/bin/head
+NB_GREP=/usr/bin/grep
+NB_AWK=/usr/bin/awk
+NB_SED=/usr/bin/sed
+NB_TR=/usr/bin/tr
+NB_SLEEP=/usr/bin/sleep
+NB_EARCTL_FALLBACK=/usr/bin/earctl
+NB_EARCTL_LOCAL=$HOME/.local/bin/earctl
+NB_STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/io.github.saiaungminkhant.nothing-buds
+NB_EARCTL_BIN_FILE=$NB_STATE_DIR/earctl-bin
+NB_CONF_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/earbuds
 
-# Address resolution, most explicit first: environment, then a saved config
-# file, then the first paired device whose name looks like a Nothing or CMF
-# product. Auto-detection is last because a user with two pairs needs to pin
-# one, and guessing differently between calls would be worse than failing.
-detect_addr() {
-  bluetoothctl devices 2>/dev/null |
-    grep -iE 'nothing|[[:space:]]cmf|ear \(|buds' |
-    head -n 1 | awk '{print $2}'
+# ------------------------------------------------------------- validators
+
+nb_valid_addr() {
+  [[ $1 =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]
 }
 
-ADDR=${EARBUDS_ADDR:-}
-[[ -z $ADDR && -r $CONF_DIR/address ]] && read -r ADDR <"$CONF_DIR/address"
-[[ -z $ADDR ]] && ADDR=$(detect_addr)
+nb_valid_channel() {
+  [[ $1 =~ ^[0-9]{1,2}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 63 ))
+}
 
-# RFCOMM channel carrying the Nothing protocol. 16 is correct for CMF Buds 2:
-# 12, 13, 17 and 29 also accept a connection there but never answer, so it
-# cannot be found by probing for an open port alone. Other models differ --
-# README documents how to find yours, and `channel` here or EARBUDS_CHANNEL
-# overrides it.
-CHANNEL=${EARBUDS_CHANNEL:-}
-[[ -z $CHANNEL && -r $CONF_DIR/channel ]] && read -r CHANNEL <"$CONF_DIR/channel"
-[[ -z $CHANNEL ]] && CHANNEL=16
+nb_read_bounded() {
+  local file=$1 max=$2 var=$3 line extra fd
+  [[ -e $file && ! -L $file && -f $file ]] || return 1
+  exec {fd}<"$file" || return 1
+  IFS= read -r -n "$max" line <&"$fd" || true
+  if IFS= read -r -n 1 extra <&"$fd"; then
+    exec {fd}<&-
+    return 2
+  fi
+  exec {fd}<&-
+  [[ -n $line ]] || return 1
+  printf -v "$var" '%s' "$line"
+  return 0
+}
+
+# ------------------------------------------------------------------- usage
+
+usage() {
+  printf '%s\n' \
+    "usage: earbuds [--address AA:BB:CC:DD:EE:FF] [--channel N] <command> [args...]" \
+    "" \
+    "commands:" \
+    "  status                  compact JSON snapshot for the bar widget" \
+    "  connect | disconnect    BlueZ link up or down, then a snapshot" \
+    "  set anc <level>          off | transparency | nc-low | nc-mid | nc-high | adaptive" \
+    "  set latency <bool>      low lag mode" \
+    "  set in-ear <bool>        in-ear detection" \
+    "  cycle                    off -> transparency -> ANC high -> off" \
+    "  ring [left|right]        find my buds (the panel bounds the tone)" \
+    "  unring                   stop the tone" \
+    "  anything else            passed straight to earctl" \
+    "" \
+    "address resolution: --address, then $NB_CONF_DIR/address, then the" \
+    "first paired device that looks like a Nothing or CMF product." \
+    "channel resolution: --channel, then $NB_CONF_DIR/channel, else 16."
+}
+
+# -------------------------------------------------------------------- args
+
+positional=()
+while (( $# > 0 )); do
+  case $1 in
+    --address)
+      [[ -n ${2:-} ]] || { printf 'nothing-buds: --address needs a value\n' >&2; exit 64; }
+      addr_arg=$2
+      shift 2 ;;
+    --channel)
+      [[ -n ${2:-} ]] || { printf 'nothing-buds: --channel needs a value\n' >&2; exit 64; }
+      channel_arg=$2
+      shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --*) printf 'nothing-buds: unknown option: %s\n' "$1" >&2; exit 64 ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+set -- "${positional[@]}"
+
+if [[ -n ${addr_arg:-} ]]; then
+  nb_valid_addr "$addr_arg" || { printf 'nothing-buds: --address must look like AA:BB:CC:DD:EE:FF\n' >&2; exit 64; }
+fi
+if [[ -n ${channel_arg:-} ]]; then
+  nb_valid_channel "$channel_arg" || { printf 'nothing-buds: --channel must be a number from 1 to 63\n' >&2; exit 64; }
+fi
+
+# ------------------------------------------------------- address and channel
+
+detect_addr() {
+  $NB_TIMEOUT --kill-after=2 10 "$NB_BT" devices 2>/dev/null |
+    $NB_HEAD -c 8192 |
+    $NB_GREP -iE 'nothing|[[:space:]]cmf|ear \(|buds' |
+    $NB_HEAD -n 1 |
+    $NB_AWK '{print $2}' || true
+}
+
+ADDR=""
+if [[ -n ${addr_arg:-} ]]; then
+  ADDR=$addr_arg
+else
+  if nb_read_bounded "$NB_CONF_DIR/address" 64 ADDR; then
+    ADDR=${ADDR%$'\r'}
+  else
+    ADDR=""
+  fi
+  if nb_valid_addr "$ADDR"; then
+    :
+  else
+    [[ -z $ADDR ]] || printf 'nothing-buds: invalid address in %s/address; ignoring it\n' "$NB_CONF_DIR" >&2
+    ADDR=$(detect_addr)
+    nb_valid_addr "$ADDR" || ADDR=""
+  fi
+fi
+
+CHANNEL=""
+if [[ -n ${channel_arg:-} ]]; then
+  CHANNEL=$channel_arg
+else
+  if nb_read_bounded "$NB_CONF_DIR/channel" 8 CHANNEL; then
+    CHANNEL=${CHANNEL%$'\r'}
+  else
+    CHANNEL=""
+  fi
+  if nb_valid_channel "$CHANNEL"; then
+    :
+  else
+    [[ -z $CHANNEL ]] || printf 'nothing-buds: invalid channel in %s/channel; ignoring it\n' "$NB_CONF_DIR" >&2
+    CHANNEL=""
+  fi
+fi
+[[ -n $CHANNEL ]] || CHANNEL=16
+# Right for CMF Buds 2; 12, 13, 17 and 29 accept but never answer. Other models differ (see README).
 
 [[ -n $ADDR ]] || { echo '{"connected":false,"paired":false,"error":"no earbuds found"}'; exit 0; }
 
-bt_connected() {
-  bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Connected: yes"
+# ------------------------------------------------------------------- earctl
+# Recorded path first, then /usr/bin, then a regular file in ~/.local/bin.
+EARCTL=""
+if [[ -e $NB_EARCTL_BIN_FILE && ! -L $NB_EARCTL_BIN_FILE && -f $NB_EARCTL_BIN_FILE ]]; then
+  recorded=""
+  if nb_read_bounded "$NB_EARCTL_BIN_FILE" 4096 recorded; then
+    recorded=${recorded%$'\r'}
+    if [[ $recorded == /* && -e $recorded && ! -L $recorded && -f $recorded && -x $recorded ]]; then
+      EARCTL=$recorded
+    fi
+  fi
+fi
+[[ -n $EARCTL ]] || { [[ -f $NB_EARCTL_FALLBACK && -x $NB_EARCTL_FALLBACK ]] && EARCTL=$NB_EARCTL_FALLBACK; }
+[[ -n $EARCTL ]] || {
+  [[ -e $NB_EARCTL_LOCAL && ! -L $NB_EARCTL_LOCAL && -f $NB_EARCTL_LOCAL && -x $NB_EARCTL_LOCAL ]] &&
+    EARCTL=$NB_EARCTL_LOCAL
 }
 
-bt_name() {
-  bluetoothctl info "$ADDR" 2>/dev/null | sed -n 's/^\s*Name: //p' | head -n 1
+# ------------------------------------------------------------------ BlueZ
+
+# No grep -q: quitting early breaks the pipe and pipefail turns a match into a failure.
+bt_info() {
+  $NB_TIMEOUT --kill-after=2 5 "$NB_BT" info "$ADDR" 2>/dev/null | $NB_HEAD -c 4096
 }
 
-bt_paired() {
-  bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Paired: yes"
-}
+bt_connected() { bt_info | $NB_GREP "Connected: yes" >/dev/null; }
+bt_paired()   { bt_info | $NB_GREP "Paired: yes" >/dev/null; }
+bt_name()     { bt_info | $NB_SED -n 's/^[[:space:]]*Name: //p' | $NB_HEAD -n 1; }
+
+# ----------------------------------------------------------------- session
 
 ensure_session() {
-  # Probe with a real read, not with `session`. A session object outlives its
-  # socket: when the buds disconnect, the server keeps reporting an active
-  # session while every write fails with ENOTCONN. Trusting `session` meant
-  # the wrapper never reconnected, and the panel sat on "disconnected" while
-  # the buds were plainly connected in BlueZ.
-  "$EARCTL" anc get >/dev/null 2>&1 && return 0
+  # Probe with a real read: `session` keeps reporting active after the buds disconnect.
+  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && return 0
 
-  # Tear the dead session down first; auto-connect refuses with 409 while one
-  # is still registered.
-  "$EARCTL" disconnect >/dev/null 2>&1
+  # auto-connect refuses with 409 while a dead session is registered.
+  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1
 
-  # Retry, because a link that has only just come up does not accept RFCOMM
-  # immediately. One attempt made a fresh connection look like a failure:
-  # bluetoothctl reported success, the session did not open yet, and the
-  # panel showed disconnected over a perfectly good link.
+  # A link that just came up does not accept RFCOMM immediately.
   local attempt
   for attempt in 1 2 3 4; do
-    "$EARCTL" auto-connect --bluetooth-address "$ADDR" --channel "$CHANNEL" >/dev/null 2>&1 &&
-      "$EARCTL" anc get >/dev/null 2>&1 && return 0
-    "$EARCTL" disconnect >/dev/null 2>&1
-    sleep 0.6
+    $NB_TIMEOUT --kill-after=2 10 "$EARCTL" auto-connect --bluetooth-address "$ADDR" --channel "$CHANNEL" >/dev/null 2>&1 &&
+      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && return 0
+    $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1
+    $NB_SLEEP 0.6
   done
   return 1
 }
 
-# One compact object for the bar widget. `connected: false` is a normal
-# state (buds in the case), not an error -- the widget hides on it.
+# ------------------------------------------------------------------ output
+
+valid_json() {
+  [[ -n ${1:-} ]] && $NB_JQ -e 'type == "object"' >/dev/null 2>&1 <<<"$1"
+}
+
+# `connected: false` is a normal state, not an error.
 cmd_status() {
   local paired=false name
   bt_paired && paired=true
   name=$(bt_name)
   [[ -n $name ]] || name="Earbuds"
 
-  if ! bt_connected || ! ensure_session; then
-    jq -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'
+  if [[ -z $EARCTL ]] || ! bt_connected || ! ensure_session; then
+    $NB_JQ -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'
     return 0
   fi
+
+  # Four round trips, about 0.2s. A bad read is absent, not fatal.
   local anc battery latency inear
-  anc=$("$EARCTL" anc get 2>/dev/null)
-  battery=$("$EARCTL" battery 2>/dev/null)
-  # Four round trips total ~0.2s, so the panel reads everything at once
-  # rather than keeping separate poll rates per field.
-  latency=$("$EARCTL" latency get 2>/dev/null)
-  inear=$("$EARCTL" in-ear get 2>/dev/null)
-  [[ -z $anc || -z $battery ]] && { jq -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'; return 0; }
-  [[ -z $latency ]] && latency='{"low_latency_enabled":null}'
-  [[ -z $inear ]] && inear='{"detection_enabled":null}'
-  jq -cn --argjson anc "$anc" --argjson b "$battery" \
+  anc=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_HEAD -c 8192)
+  battery=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192)
+  latency=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency get 2>/dev/null | $NB_HEAD -c 8192)
+  inear=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear get 2>/dev/null | $NB_HEAD -c 8192)
+
+  valid_json "$anc" && valid_json "$battery" ||
+    { $NB_JQ -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'; return 0; }
+  valid_json "$latency" || latency='{"low_latency_enabled":null}'
+  valid_json "$inear" || inear='{"detection_enabled":null}'
+
+  $NB_JQ -cn --argjson anc "$anc" --argjson b "$battery" \
          --argjson lat "$latency" --argjson ie "$inear" --arg n "$name" '
     def lvl($x): if ($x | type) == "object" and ($x | has("Level"))
                  then $x.Level.percent else null end;
@@ -114,87 +250,94 @@ cmd_status() {
      in_ear: $ie.detection_enabled}'
 }
 
-# `earctl ring` asks for an interactive y/N on stdin before playing the tone.
-# A Process spawned from QML has no stdin, so the prompt read EOF and the
-# command silently cancelled -- this is why the panel's Find button did
-# nothing. Feeding the confirmation makes it work unattended.
+# ---------------------------------------------------------------- commands
+
+# `earctl ring` prompts y/N on stdin; a Process from QML has none.
 cmd_ring() {
   ensure_session || return 1
-  local side=${2:-}
+  local side=${1:-}
   if [[ -n $side ]]; then
-    echo y | "$EARCTL" ring --enable true --side "$side" >/dev/null 2>&1
+    printf 'y\n' | $NB_TIMEOUT --kill-after=2 15 "$EARCTL" ring --enable true --side "$side" >/dev/null 2>&1
   else
-    echo y | "$EARCTL" ring --enable true >/dev/null 2>&1
+    printf 'y\n' | $NB_TIMEOUT --kill-after=2 15 "$EARCTL" ring --enable true >/dev/null 2>&1
   fi
 }
 
 cmd_unring() {
   ensure_session || return 1
-  "$EARCTL" ring --enable false >/dev/null 2>&1
+  $NB_TIMEOUT --kill-after=2 15 "$EARCTL" ring --enable false >/dev/null 2>&1
 }
 
 cmd_connect() {
-  timeout 25 bluetoothctl connect "$ADDR" >/dev/null 2>&1
+  $NB_TIMEOUT --kill-after=2 25 "$NB_BT" connect "$ADDR" >/dev/null 2>&1
 
-  # bluetoothctl returns as soon as the link is up, before the earbuds are
-  # ready to talk. Give the link a moment to settle rather than reporting a
-  # failure that is really just impatience.
+  # bluetoothctl returns before the buds are ready; let the link settle.
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
     bt_connected && break
-    sleep 0.3
+    $NB_SLEEP 0.3
   done
   cmd_status
 }
 
 cmd_disconnect() {
-  "$EARCTL" disconnect >/dev/null 2>&1
-  timeout 25 bluetoothctl disconnect "$ADDR" >/dev/null 2>&1
+  [[ -z $EARCTL ]] || $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1
+  $NB_TIMEOUT --kill-after=2 25 "$NB_BT" disconnect "$ADDR" >/dev/null 2>&1
   cmd_status
 }
 
 # Named setters so the panel never has to know earctl's argument shapes.
 cmd_set() {
-  ensure_session || { echo '{"connected":false}'; return 0; }
-  case ${2:-} in
-    latency) "$EARCTL" latency set "${3:-false}" >/dev/null 2>&1 ;;
-    in-ear)  "$EARCTL" in-ear set "${3:-false}" >/dev/null 2>&1 ;;
-    anc)     "$EARCTL" anc set "${3:-off}" >/dev/null 2>&1 ;;
-    *)       echo "unknown setting: ${2:-}" >&2; return 1 ;;
+  if [[ -z $EARCTL ]] || ! ensure_session; then
+    echo '{"connected":false}'
+    return 0
+  fi
+  case ${1:-} in
+    latency) $NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency set "${2:-false}" >/dev/null 2>&1 ;;
+    in-ear)  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear set "${2:-false}" >/dev/null 2>&1 ;;
+    anc)     $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc set "${2:-off}" >/dev/null 2>&1 ;;
+    *)       printf 'unknown setting: %s\n' "${1:-}" >&2; return 64 ;;
   esac
   cmd_status
 }
 
-# Cycle the three modes worth having on a hotkey; the low/mid/adaptive
-# levels stay reachable via `earbuds anc set <level>`.
+# off -> transparency -> ANC high; other levels stay reachable via `set anc`.
 cmd_cycle() {
-  ensure_session || { echo '{"connected":false}'; return 0; }
+  if [[ -z $EARCTL ]] || ! ensure_session; then
+    echo '{"connected":false}'
+    return 0
+  fi
   local now next
-  now=$("$EARCTL" anc get 2>/dev/null | tr -d '"')
-  # A read straight after a previous set sometimes comes back empty; one
-  # retry settles it. Without this the unknown-value branch below fires and
-  # the cycle appears to skip a mode.
-  [[ -z $now ]] && { sleep 0.3; now=$("$EARCTL" anc get 2>/dev/null | tr -d '"'); }
+  now=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_TR -d '"' | $NB_HEAD -c 256)
+  # A read straight after a set can come back empty; retry once.
+  [[ -n $now ]] || { $NB_SLEEP 0.3; now=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_TR -d '"' | $NB_HEAD -c 256); }
   case $now in
     off)                 next=transparency ;;
     transparency)        next=nc-high ;;
     noise_cancellation*) next=off ;;
-    # Still unreadable, or a level this cycle does not cover (low/mid/
-    # adaptive): report what is there and change nothing, rather than
-    # guessing and yanking the user out of a mode they chose deliberately.
+    # Unreadable or a level this cycle does not cover: report, change nothing.
     *)                   cmd_status; return 0 ;;
   esac
-  "$EARCTL" anc set "$next" >/dev/null 2>&1
+  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc set "$next" >/dev/null 2>&1
   cmd_status
 }
 
+# ---------------------------------------------------------------- dispatch
+
 case ${1:-status} in
-  status) cmd_status ;;
-  cycle)  cmd_cycle ;;
-  ring)   cmd_ring "$@" ;;
-  connect)    cmd_connect ;;
+  status)    cmd_status ;;
+  cycle)     cmd_cycle ;;
+  ring)      shift; cmd_ring "$@" ;;
+  unring)    cmd_unring ;;
+  connect)   cmd_connect ;;
   disconnect) cmd_disconnect ;;
-  unring) cmd_unring ;;
-  set)    cmd_set "$@" ;;
-  *)      ensure_session; exec "$EARCTL" "$@" ;;
+  set)       shift; cmd_set "$@" ;;
+  *)
+    if [[ -n $EARCTL ]]; then
+      exec "$EARCTL" "$@"
+    else
+      printf 'nothing-buds: earctl is not installed\n' >&2
+      exit 64
+    fi
+    ;;
 esac

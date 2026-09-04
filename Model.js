@@ -1,8 +1,6 @@
 .pragma library
 
-// earctl reports the enum's serde name ("noise_cancellation_high"); the CLI
-// setter takes the short form ("nc-high"). Only the long form ever arrives
-// from a read, so the mapping is one-way.
+// earctl reads report the long serde name; the setter takes the short form.
 var LEVELS = {
   "off":                            { mode: "off",    strength: "",         label: "ANC off" },
   "transparency":                   { mode: "trans",  strength: "",         label: "Transparency" },
@@ -20,8 +18,7 @@ function modeOf(anc)     { return level(anc).mode }
 function strengthOf(anc) { return level(anc).strength }
 function labelOf(anc)    { return level(anc).label }
 
-// Glyph for the bar pill. Deliberately three distinct silhouettes so the
-// mode is readable at bar size without colour doing the work.
+// Bar glyph: three distinct silhouettes so the mode reads without colour.
 function glyph(connected, anc) {
   if (!connected) return "󰋋"
   var m = modeOf(anc)
@@ -30,8 +27,7 @@ function glyph(connected, anc) {
   return "󰋋"                      // headphones: no processing
 }
 
-// Lowest of the two buds — the number that actually matters for "do I need
-// to charge these". The case is reported separately and is often absent.
+// Lowest of the two buds; the case is often absent.
 function lowestBattery(state) {
   if (!state || state.connected !== true) return -1
   var vals = []

@@ -9,100 +9,137 @@ import qs.Ui
 import "Model.js" as Model
 
 // Bar pill plus popout for Nothing/CMF earbuds, driven by the `earbuds`
-// wrapper around earctl. The wrapper owns the RFCOMM session and answers with
-// one compact JSON object, so nothing here touches Bluetooth directly.
+// wrapper (one JSON object per call). One Panel owns both the bar button and
+// the popout, like the first-party plugins.
 //
-// Entry point is this file rather than a separate BarWidget.qml, matching the
-// bluetooth / network / monitor plugins: one Panel owns both the bar button
-// and the popout.
+// Two rules from the marketplace security review: setup never runs without a
+// click, and every spawned helper is bounded (timeout on the process group,
+// capped output, watchdog so busy/link state cannot wedge).
 Panel {
   id: root
   moduleName: "io.github.saiaungminkhant.nothing-buds"
   ipcTarget: "io.github.saiaungminkhant.nothing-buds"
 
-  // Last successful reading. `connected: false` is a valid answer, not a
-  // failure, so it is stored like any other state.
-  // paired:false up front so a missing wrapper does not read as "buds are
-  // paired, just not connected" before the first status lands.
+  // Last successful reading; connected:false is a valid state.
   property var state: ({ connected: false, paired: false })
 
-  // Optional overrides from this widget's shell.json layout entry:
-  //   { "id": "...", "address": "AA:BB:...", "channel": 16 }
-  // Left unset, the wrapper resolves the address from ~/.config/earbuds or
-  // by finding the first paired Nothing/CMF device.
-  readonly property string cfgAddress: setting("address", "")
-  readonly property int cfgChannel: setting("channel", 0)
+  // ---------------------------------------------------------------- paths
+  // Absolute paths, never PATH-resolved.
+  readonly property string homeDir: Quickshell.env("HOME") || ""
+  readonly property string stateDir:
+    (Quickshell.env("XDG_STATE_HOME") || homeDir + "/.local/state")
+    + "/io.github.saiaungminkhant.nothing-buds"
+  readonly property string earbudsBin: homeDir + "/.local/bin/earbuds"
+  readonly property string earctlLocal: homeDir + "/.local/bin/earctl"
+  readonly property string earctlUsr: "/usr/bin/earctl"
+  // Omarchy's own launcher; /usr/share/omarchy/bin holds a symlink to it.
+  readonly property string launchTui: "/usr/bin/omarchy-launch-tui"
 
-  // False until the probe finds the wrapper on PATH. The plugin ships QML
-  // only, so a fresh install has no `earbuds` until setup/install.sh is run;
-  // the panel says so rather than sitting silently broken.
-  property bool setupOk: true
-
-  // Path to our own setup script. Resolved from this QML file rather than
-  // hardcoded so it survives the plugin folder being renamed or relocated.
+  // Resolved from this file so a renamed plugin folder still works.
   readonly property string setupScript: {
     var url = String(Qt.resolvedUrl("setup/install.sh"))
     return url.indexOf("file://") === 0 ? url.substring(7) : url
   }
 
-  // True once the silent attempt has told us earctl is the only thing left,
-  // which is the one piece of setup that may need a password.
+  // ------------------------------------------------------------- overrides
+  // Per-widget overrides from shell.json ({ "address": "AA:BB:...",
+  // "channel": 16 }), validated before they reach the wrapper.
+  readonly property string cfgAddress: setting("address", "")
+  readonly property int cfgChannel: setting("channel", 0)
+
+  readonly property bool addrValid:
+    cfgAddress !== "" && /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(cfgAddress)
+  readonly property bool channelValid: cfgChannel >= 1 && cfgChannel <= 63
+
+  readonly property string configNotice: {
+    var bad = []
+    if (cfgAddress !== "" && !addrValid) bad.push("address")
+    if (cfgChannel !== 0 && !channelValid) bad.push("channel")
+    return bad.length > 0
+      ? "Ignoring invalid " + bad.join(" and ") + " in shell.json"
+      : ""
+  }
+
+  // The wrapper takes overrides as arguments, never as environment.
+  function cmd(args) {
+    var out = [earbudsBin]
+    if (addrValid) out.push("--address", cfgAddress)
+    if (channelValid) out.push("--channel", String(cfgChannel))
+    return out.concat(args)
+  }
+
+  // ---------------------------------------------------------------- setup
+  // Complete only when the wrapper (byte-identical to the shipped one),
+  // earctl and the unit all exist; `install.sh --check` answers that and
+  // changes nothing.
+  property bool setupComplete: false
+  // The "Set up" click: the consent that lets later states finish the job.
+  property bool setupConsented: false
+  // Installer exit 2: everything but earctl, which needs a terminal.
   property bool needsEarctl: false
+  // The terminal install is detached, so polling is how we notice.
+  property bool earctlPresent: false
   property bool bootstrapping: false
 
-  // Bootstrap is attempted once per session. The probe keeps polling after
-  // that so the panel still notices when you install earctl yourself, but
-  // re-running the installer every four seconds would be a loop, not a fix.
-  property bool bootstrapTried: false
-
-  // setupOk only says the wrapper exists. Setup is not finished until earctl
-  // is there too, and conflating the two let the panel present a working
-  // interface over a missing dependency.
-  readonly property bool ready: setupOk && !needsEarctl
-
-  // Most of setup is a file copy and a --user systemd unit, so the plugin
-  // just does it rather than sending anyone to a terminal. install.sh exits
-  // 2 when only earctl is left, which is when a button appears.
-  function bootstrap() {
-    if (root.bootstrapping || root.bootstrapTried) return
-    root.bootstrapTried = true
-    root.bootstrapping = true
-    bootstrapProc.command = [root.setupScript]
-    bootstrapProc.running = true
-  }
-
-  // Opens a real terminal so yay can prompt for a password. Nothing else in
-  // setup needs one.
-  function installEarctl() {
-    setupRunProc.command = ["omarchy-launch-tui", root.setupScript]
-    setupRunProc.running = true
-  }
-
-  // The terminal is detached, so nothing reports back when it finishes. The
-  // probe poll below is what notices.
-  onSetupOkChanged: if (setupOk) root.needsEarctl = false
-
-  // Wraps a command with any configured overrides. `env` rather than
-  // Process.environment so the plugin does not depend on that API being
-  // present in the installed Quickshell.
-  function cmd(args) {
-    var prefix = []
-    if (cfgAddress !== "") prefix.push("EARBUDS_ADDR=" + cfgAddress)
-    if (cfgChannel > 0) prefix.push("EARBUDS_CHANNEL=" + cfgChannel)
-    return prefix.length > 0 ? ["env"].concat(prefix).concat(args) : args
-  }
   property bool busy: false
   property string lastError: ""
+
+  function probeCmd() { return [setupScript, "--check"] }
+
+  // earctl alone, as a bare /usr/bin/test: no shell in sight.
+  function earctlCmd() {
+    return ["/usr/bin/test", "-x", earctlUsr, "-o", "-x", earctlLocal]
+  }
+
+  function probe() { probeProc.start(probeCmd()) }
+
+  function bootstrap() {
+    if (root.bootstrapping || root.setupComplete) return
+    root.bootstrapping = true
+    root.lastError = ""
+    bootstrapProc.start([setupScript, "--yes"])
+  }
+
+  // A real terminal, so the installer can prompt and yay can ask for a
+  // password. Detached; the poll below notices when it finishes.
+  function installEarctl() {
+    Quickshell.execDetached([launchTui, setupScript])
+  }
+
+  function firstNote(text) {
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var t = lines[i].replace(/^\s*nothing-buds:\s*/, "").trim()
+      if (t !== "") return t.length > 180 ? t.substring(0, 177) + "..." : t
+    }
+    return ""
+  }
+
+  function bootstrapDone(code, err) {
+    root.bootstrapping = false
+    if (code === 0) {
+      root.needsEarctl = false
+    } else if (code === 2) {
+      // Everything is in place except earctl, which needs a terminal.
+      root.needsEarctl = true
+    } else if (code === 3) {
+      root.lastError = "Setup needs bluetoothctl and jq (bluez-utils and jq)."
+    } else if (code === 5) {
+      root.lastError = firstNote(err) ||
+        "Setup refused: a pre-existing file is in the way (see README)."
+    } else if (code === 124) {
+      root.lastError = "Setup timed out."
+    } else {
+      root.lastError = firstNote(err) || ("Setup failed (exit " + code + ").")
+    }
+    root.probe()
+  }
 
   readonly property bool connected: linkUp && state && state.connected === true
   readonly property string anc: connected && state.anc ? String(state.anc) : ""
   readonly property string mode: Model.modeOf(anc)
   readonly property string strength: Model.strengthOf(anc)
-  // Link state comes straight from BlueZ rather than from the wrapper's
-  // status. Polling a subprocess meant a disconnect took until the next tick
-  // to show, up to 45 seconds with the panel closed; this updates the instant
-  // BlueZ does. The wrapper is still the source for ANC and battery, which
-  // have no D-Bus equivalent.
+  // Link state comes from BlueZ directly (instant); the wrapper is still the source for ANC and battery.
   readonly property var btDevices: Bluetooth.devices ? Bluetooth.devices.values : []
 
   readonly property var btDevice: {
@@ -112,8 +149,7 @@ Panel {
       var d = btDevices[i]
       if (!d) continue
       if (wanted !== "" && String(d.address || "").toUpperCase() === wanted) return d
-      // No pinned address: take the first paired device the wrapper would
-      // also pick, matching on the same brand names.
+      // No pinned address: first paired device the wrapper would also pick.
       if (fallback === null && d.paired && /nothing|(^|\s)cmf\s|ear \(/i.test(String(d.name || "")))
         fallback = d
     }
@@ -123,22 +159,17 @@ Panel {
   readonly property bool paired: btDevice !== null && btDevice.paired === true
   readonly property string deviceName: btDevice && btDevice.name ? String(btDevice.name) : "Earbuds"
 
-  // A link that just came up still needs its RFCOMM session, so `connected`
-  // stays gated on the wrapper actually answering.
+  // A fresh link still needs its RFCOMM session, so this waits for the wrapper.
   readonly property bool linkUp: btDevice !== null && btDevice.connected === true
   property bool linking: false
 
-  // Set when a connect attempt finished with the link still down. BlueZ
-  // fails this as br-connection-page-timeout, which means the earbuds never
-  // answered -- almost always because they are shut in their case.
+  // Connect finished with the link still down: usually the buds are in their case.
   property bool linkFailed: false
 
   readonly property bool lowLatency: connected && state.low_latency === true
   readonly property bool inEar: connected && state.in_ear === true
 
-  // Theme bindings, same shape every first-party panel uses. barForeground
-  // comes from the Panel base and already tracks the bar's transparency-aware
-  // foreground; dimming by 1.55 is the shared convention for "inactive".
+  // Theme bindings as in every first-party panel; 1.55 is the shared "inactive" dim.
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -153,10 +184,7 @@ Panel {
     { value: "adaptive", label: "Adaptive" }
   ]
 
-  // Always on the bar once enabled. Hiding until something was paired meant
-  // adding the plugin appeared to do nothing at all, which reads as broken
-  // rather than as "no earbuds yet". The pill dims instead, and the panel
-  // says which of the three states it is in.
+  // Always on the bar once enabled; the pill dims rather than hiding.
   visible: true
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -169,21 +197,18 @@ Panel {
       root.state = JSON.parse(text)
       root.lastError = ""
     } catch (e) {
-      // A half-written line or a wrapper error: keep the previous reading
-      // rather than blanking the pill.
+      // Keep the previous reading rather than blanking the pill.
       root.lastError = "Could not read earbud state"
     }
   }
 
   function refresh() {
-    if (root.busy || !root.setupOk) return
+    if (root.busy || !root.setupComplete) return
     root.busy = true
-    statusProc.running = true
+    statusProc.start(root.cmd(["status"]))
   }
 
-  // Selecting a mode keeps whatever ANC strength was already set, so
-  // toggling Transparency and back does not silently drop the user from
-  // adaptive to high.
+  // Keep the ANC strength when switching modes.
   function setMode(next) {
     if (next === "anc") setLevel(root.strength !== "" ? root.strength : "nc-high")
     else if (next === "trans") setLevel("transparency")
@@ -193,127 +218,224 @@ Panel {
   function setLevel(level) {
     if (root.busy || level === "") return
     root.busy = true
-    setProc.command = root.cmd(["earbuds", "anc", "set", level])
-    setProc.running = true
+    setProc.start(root.cmd(["set", "anc", level]))
   }
 
   function ring() {
     if (!root.connected) return
-    ringProc.running = true
+    ringProc.start(root.cmd(["ring"]))
     ringTimer.restart()
   }
 
   function stopRing() {
     ringTimer.stop()
-    unringProc.running = true
+    unringProc.start(root.cmd(["unring"]))
   }
 
   function setLink(on) {
-    if (root.linking) return
+    if (root.linking || !root.setupComplete) return
     root.linkFailed = false
     root.linking = true
-    linkProc.command = root.cmd(["earbuds", on ? "connect" : "disconnect"])
-    linkProc.running = true
+    linkProc.start(root.cmd([on ? "connect" : "disconnect"]))
   }
 
   function setLatency(on) {
     if (root.busy) return
     root.busy = true
-    latencyProc.command = root.cmd(["earbuds", "set", "latency", on ? "true" : "false"])
-    latencyProc.running = true
+    latencyProc.start(root.cmd(["set", "latency", on ? "true" : "false"]))
   }
 
   function setInEar(on) {
     if (root.busy) return
     root.busy = true
-    inEarProc.command = root.cmd(["earbuds", "set", "in-ear", on ? "true" : "false"])
-    inEarProc.running = true
+    inEarProc.start(root.cmd(["set", "in-ear", on ? "true" : "false"]))
   }
 
-  Process {
-    id: setupRunProc
-    stdout: StdioCollector { waitForEnd: true }
+  function stopAll() {
+    var ps = [probeProc, earctlProc, bootstrapProc, statusProc, setProc,
+              ringProc, unringProc, linkProc, latencyProc, inEarProc]
+    for (var i = 0; i < ps.length; i++) ps[i].stop()
   }
 
-  Process {
-    id: bootstrapProc
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
-    onExited: function(exitCode) {
-      root.bootstrapping = false
-      // 2 means everything landed except earctl.
-      root.needsEarctl = exitCode === 2
-      probeProc.running = true
-    }
-  }
+  Component.onCompleted: root.probe()
+  Component.onDestruction: root.stopAll()
 
-  // While setup is unfinished, keep re-checking so the panel flips over on
-  // its own once the terminal has done its work. No signal comes back from
-  // a detached terminal, so polling is the only way to notice.
-  Timer {
-    interval: 4000
-    running: !root.setupOk
-    repeat: true
-    onTriggered: probeProc.running = true
-  }
-
-  Process {
-    id: probeProc
-    // Both, not just the wrapper: with earctl missing the wrapper is present
-    // but useless, and checking only for it let the panel look ready over a
-    // half-finished install.
-    command: ["bash", "-c", "command -v earbuds >/dev/null 2>&1 && command -v earctl >/dev/null 2>&1"]
-    onExited: function(exitCode) {
-      root.setupOk = exitCode === 0
-      // First load on a fresh install: do the work instead of asking.
-      if (!root.setupOk) root.bootstrap()
-    }
-  }
-
-  Component.onCompleted: probeProc.running = true
-
-  // BlueZ tells us immediately; ask the wrapper for the details right away
-  // rather than leaving the panel stale until the next poll.
+  // BlueZ said so; ask the wrapper for details now rather than next poll.
   onLinkUpChanged: Qt.callLater(root.refresh)
 
-  Process {
-    id: statusProc
-    command: root.cmd(["earbuds", "status"])
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.apply(text)
+  // ------------------------------------------------------------------ setup
+  // processes
+
+  component BoundedProcess: Process {
+    id: bp
+
+    // Seconds /usr/bin/timeout enforces, including the KILL grace.
+    property string deadline: "30"
+    // Ceiling on buffered stdout; more than this is a misbehaving helper.
+    property int cap: 8192
+    // Called exactly once per start: (exitCode, stdout, stderr, ok)
+    property var onDone: null
+
+    property string outBuf: ""
+    property string errBuf: ""
+    property bool overflowed: false
+    property bool live: false
+    // A start() that arrived while the old run was still dying; launched from onExited.
+    property var pendingArgs: null
+
+    function start(args) {
+      if (bp.running) {
+        // Supersede: TERM the old run, drop its late answers, queue this one.
+        bp.pendingArgs = args
+        bp.live = false
+        bp.running = false
+        return
+      }
+      bp.launch(args)
     }
-    onExited: root.busy = false
+
+    function launch(args) {
+      bp.outBuf = ""
+      bp.errBuf = ""
+      bp.overflowed = false
+      bp.live = true
+      bp.command = ["/usr/bin/timeout", "--kill-after=5", bp.deadline].concat(args)
+      bp.running = true
+      watch.interval = (parseInt(bp.deadline, 10) + 8) * 1000
+      watch.restart()
+    }
+
+    // Abandon in-flight and queued work; used on destruction.
+    function stop() {
+      bp.pendingArgs = null
+      bp.live = false
+      watch.stop()
+      bp.running = false
+    }
+
+    function take(line, isErr) {
+      if (!bp.live) return
+      if (isErr) {
+        if (bp.errBuf.length < 4096) bp.errBuf += line + "\n"
+        return
+      }
+      if (bp.outBuf.length + line.length > bp.cap) {
+        bp.overflowed = true
+        bp.live = false
+        bp.running = false
+        if (bp.onDone) bp.onDone(126, "", bp.errBuf, false)
+        return
+      }
+      bp.outBuf += line + "\n"
+    }
+
+    stdout: SplitParser { onRead: function(line) { bp.take(line, false) } }
+    stderr: SplitParser { onRead: function(line) { bp.take(line, true) } }
+
+    onExited: function(exitCode, exitStatus) {
+      watch.stop()
+      var wasLive = bp.live
+      bp.live = false
+      if (bp.pendingArgs !== null) {
+        var next = bp.pendingArgs
+        bp.pendingArgs = null
+        bp.launch(next)
+        return
+      }
+      // Superseded, overflowed or watchdog-timed-out runs were already answered for.
+      if (!wasLive) return
+      var killed = exitStatus !== 0
+      if (bp.onDone)
+        bp.onDone(exitCode, bp.overflowed ? "" : bp.outBuf, bp.errBuf, !killed && exitCode === 0)
+    }
+
+    Timer {
+      id: watch
+      interval: 38000
+      onTriggered: {
+        // The binary timeout should have fired long before this; this exists so
+        // a lost onExited can never wedge state.
+        bp.live = false
+        bp.running = false
+        if (bp.onDone) bp.onDone(124, "", bp.errBuf, false)
+      }
+    }
   }
 
-  // `earbuds anc set` prints earctl's own ack, not a status object, so the
-  // panel re-reads afterwards to pick up the level the buds actually took.
-  Process {
-    id: setProc
-    stdout: StdioCollector { waitForEnd: true }
-    onExited: {
+  // Full setup check: wrapper current, earctl and unit file present.
+  BoundedProcess {
+    id: probeProc
+    deadline: "5"
+    onDone: function(code, out, err, ok) {
+      root.setupComplete = ok
+      if (ok) {
+        root.needsEarctl = false
+        root.lastError = ""
+      }
+    }
+  }
+
+  // Earctl alone; used to notice the terminal install finishing.
+  BoundedProcess {
+    id: earctlProc
+    deadline: "3"
+    onDone: function(code, out, err, ok) { root.earctlPresent = ok }
+  }
+
+  BoundedProcess {
+    id: bootstrapProc
+    deadline: "240"
+    cap: 16384
+    onDone: function(code, out, err, ok) { root.bootstrapDone(code, err) }
+  }
+
+  // Poll until setup is done; a detached terminal sends no signal back.
+  Timer {
+    interval: 4000
+    running: !root.setupComplete
+    repeat: true
+    onTriggered: {
+      root.probe()
+      if (root.needsEarctl) earctlProc.start(root.earctlCmd())
+    }
+  }
+
+  // ----------------------------------------------------------------- status
+  // processes
+
+  BoundedProcess {
+    id: statusProc
+    deadline: "40"
+    onDone: function(code, out, err, ok) {
       root.busy = false
+      if (ok) root.apply(out)
+      else if (code === 124) root.lastError = "The earbuds command timed out."
+      else root.lastError = "Could not read earbud state."
+    }
+  }
+
+  // Re-read so the panel shows the level the buds actually took.
+  BoundedProcess {
+    id: setProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (!ok && code === 124) root.lastError = "The earbuds command timed out."
       Qt.callLater(root.refresh)
     }
   }
 
-  // `earbuds ring` feeds earctl the y/N confirmation it demands on stdin.
-  // Calling earctl directly from here is what left the Find button dead: with
-  // no stdin the prompt hit EOF and the command cancelled itself.
-  Process {
+  BoundedProcess {
     id: ringProc
-    command: root.cmd(["earbuds", "ring"])
-    stdout: StdioCollector { waitForEnd: true }
+    deadline: "20"
   }
 
-  Process {
+  BoundedProcess {
     id: unringProc
-    command: root.cmd(["earbuds", "unring"])
-    stdout: StdioCollector { waitForEnd: true }
+    deadline: "20"
   }
 
-  // The tone does not stop on its own, so it is bounded here rather than
-  // leaving the user to hunt for an off switch.
+  // The tone does not stop on its own.
   Timer {
     id: ringTimer
     interval: 8000
@@ -321,49 +443,42 @@ Panel {
     onTriggered: root.stopRing()
   }
 
-  // Both setters echo the full post-change status, so one call acts and
-  // refreshes without a follow-up poll.
-  // bluetoothctl takes a second or two, so the switch shows busy until the
-  // status this returns lands.
-  Process {
+  // bluetoothctl plus the RFCOMM re-establish take a few seconds.
+  BoundedProcess {
     id: linkProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.apply(text)
-    }
-    onExited: {
+    deadline: "60"
+    onDone: function(code, out, err, ok) {
       root.linking = false
+      if (ok) root.apply(out)
       // BlueZ is the authority here, and it has already settled by now.
       root.linkFailed = !root.linkUp
       Qt.callLater(root.refresh)
     }
   }
 
-  Process {
+  // Setters echo the full status, so no follow-up poll.
+  BoundedProcess {
     id: latencyProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.apply(text)
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
     }
-    onExited: root.busy = false
   }
 
-  Process {
+  BoundedProcess {
     id: inEarProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.apply(text)
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
     }
-    onExited: root.busy = false
   }
 
-  // A full read is four RFCOMM round trips and costs about 0.2s, so polling
-  // often enough that nobody reaches for a refresh button is affordable.
-  // Still slower while closed: battery moves over tens of minutes, and the
-  // socket takes one client at a time.
+  // A read costs about 0.2s; poll fast while open, slow while closed.
   Timer {
     interval: root.opened ? 5000 : 45000
-    running: true
+    running: root.setupComplete
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
@@ -373,8 +488,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // The nerd-font ear glyphs collapse into an unreadable box at bar size,
-    // so a Phosphor glyph is drawn instead, with a state light in the corner.
+    // Nerd-font ear glyphs are unreadable at bar size.
     iconComponent: Component {
       Item {
         anchors.fill: parent
@@ -389,23 +503,20 @@ Panel {
         StatusDot {
           anchors.right: parent.right
           anchors.bottom: parent.bottom
-          // Small, and pushed into the corner: at 6px it sat over the right
-          // earcup and read as a red earcup rather than a separate light.
+          // Small and cornered so it does not read as a red earcup.
           dotSize: Style.space(5)
           anchors.rightMargin: -Style.space(1)
           anchors.bottomMargin: -Style.space(1)
           muted: root.barIconColor
-          // Disconnected reads as off: an accent dot on a dead link would
-          // advertise an ANC state that is not actually in effect.
+          // A dead link shows off, not a stale ANC state.
           mode: root.connected ? root.mode : "off"
-          // Punched out of the bar's own background so the dot reads as a
-          // separate light rather than part of the glyph.
+          // Punched out of the bar background.
           outline: root.bar ? root.bar.background : Color.background
         }
       }
     }
     tooltipText: root.opened ? ""
-      : (!root.ready ? "Setup required"
+      : (!root.setupComplete ? "Setup required"
          : (root.paired ? Model.summary(root.state) : "No earbuds paired"))
 
     onPressed: function(buttonCode) {
@@ -422,8 +533,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(320))
-    // Raised from 520: the circular mode row is taller than the chips it
-    // replaced, and the old cap clipped the action buttons off the bottom.
+    // 520 clipped the action buttons.
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {
@@ -451,9 +561,8 @@ Panel {
         PanelHero {
           width: parent.width
           title: root.deviceName
-          // "Disconnected" would be a lie before setup has run: nothing is
-          // disconnected, the wrapper this reads through is simply absent.
-          meta: !root.ready ? "Setup required"
+          // "Disconnected" would be a lie before setup.
+          meta: !root.setupComplete ? "Setup required"
               : (root.paired ? Model.summary(root.state) : "No earbuds paired")
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -463,21 +572,19 @@ Panel {
               iconSize: Style.space(34)
               icon: "headphones"
               color: root.foreground
-              // No state light here: the meta line beneath already spells the
-              // mode out, and the selected mode button repeats it.
+              // The meta line already spells the mode out.
               opacity: root.connected ? 1.0 : 0.5
             }
           }
 
-          // Connects and disconnects the buds themselves, in the hero's
-          // trailing slot where the dropbox and tailscale panels put theirs.
+          // Connect/disconnect switch in the hero's trailing slot.
           trailingControl: Component {
             ToggleSwitch {
               id: powerSwitch
 
               checked: root.connected
               busy: root.linking
-              interactive: root.ready && root.paired
+              interactive: root.setupComplete && root.paired
               foreground: root.foreground
               accent: root.foreground
               onToggled: root.setLink(!root.connected)
@@ -503,19 +610,20 @@ Panel {
 
         PanelSeparator { width: parent.width; foreground: root.foreground }
 
+        // Not set up, nothing clicked: explain and wait for the click.
         Column {
-          visible: !root.ready
+          visible: !root.setupComplete && !root.setupConsented && !root.bootstrapping
           width: parent.width
           spacing: Style.space(10)
 
           Text {
             width: parent.width
-            text: root.bootstrapping ? "Setting things up..."
-                : (root.needsEarctl
-                    ? "Everything is installed except earctl, which talks to "
-                      + "the earbuds. Installing it may ask for your password, "
-                      + "so it needs a terminal."
-                    : "Finishing setup...")
+            text: "Setup installs a few things outside this plugin's folder:\n"
+                + "the earbuds command in ~/.local/bin, a systemd --user\n"
+                + "service that talks to the earbuds, and a small config in\n"
+                + "~/.config/earbuds. Nothing runs as root. earctl itself may\n"
+                + "need your password; if it is missing, setup stops and offers\n"
+                + "a terminal."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -523,7 +631,50 @@ Panel {
           }
 
           Button {
-            visible: root.needsEarctl && !root.bootstrapping
+            width: parent.width
+            text: "Set up now"
+            iconText: "󰇚"
+            bordered: true
+            foreground: root.foreground
+            accent: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.setupConsented = true
+              root.bootstrap()
+            }
+          }
+        }
+
+        // Setup was consented to and is somewhere in flight.
+        Column {
+          visible: !root.setupComplete && root.setupConsented
+          width: parent.width
+          spacing: Style.space(10)
+
+          Text {
+            visible: root.bootstrapping
+            width: parent.width
+            text: "Setting things up..."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
+            width: parent.width
+            text: "Everything is installed except earctl, which talks to "
+                + "the earbuds. Installing it may ask for your password, "
+                + "so it needs a terminal."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Button {
+            visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
             width: parent.width
             text: "Install earctl"
             iconText: "󰇚"
@@ -533,10 +684,34 @@ Panel {
             fontFamily: root.fontFamily
             onClicked: root.installEarctl()
           }
+
+          // earctl appeared on its own: one more explicit click finishes the job.
+          Text {
+            visible: !root.bootstrapping && root.lastError === ""
+              && (!root.needsEarctl || root.earctlPresent)
+            width: parent.width
+            text: "Almost there. Finish the setup that was agreed to:"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Button {
+            visible: !root.bootstrapping && (!root.needsEarctl || root.earctlPresent)
+            width: parent.width
+            text: root.lastError !== "" ? "Try setup again" : "Finish setup"
+            iconText: "󰇚"
+            bordered: true
+            foreground: root.foreground
+            accent: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.bootstrap()
+          }
         }
 
         Column {
-          visible: root.ready && !root.paired
+          visible: root.setupComplete && !root.paired
           width: parent.width
           spacing: Style.space(10)
 
@@ -563,15 +738,13 @@ Panel {
         }
 
         Column {
-          visible: root.ready && root.paired && !root.connected
+          visible: root.setupComplete && root.paired && !root.connected
           width: parent.width
           spacing: Style.space(10)
 
           Text {
             width: parent.width
-            // Say Bluetooth explicitly: everything below needs the link up
-            // first, and "disconnected" alone left people looking for a
-            // control in here rather than connecting the buds.
+            // Say Bluetooth explicitly; everything below needs the link.
             text: root.linkUp
                 ? "Connected over Bluetooth. Waiting for the earbuds to answer."
                 : (root.linkFailed
@@ -599,7 +772,7 @@ Panel {
         }
 
         PanelSectionHeader {
-          visible: root.connected && root.ready
+          visible: root.connected && root.setupComplete
           text: "Noise Cancellation"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -607,7 +780,7 @@ Panel {
 
         Row {
           id: modeRow
-          visible: root.connected && root.ready
+          visible: root.connected && root.setupComplete
           width: parent.width
           spacing: Style.space(8)
 
@@ -618,16 +791,11 @@ Panel {
           ModeButton { width: modeRow.cellWidth; value: "off";   label: "Off" }
         }
 
-        // Strength only exists inside ANC; showing it while off or in
-        // transparency would offer a control that does nothing.
-        //
-        // Hand-rolled rather than a ButtonGroup so the four options can flex
-        // to fill the panel: ButtonGroup sizes each chip to its own label,
-        // which left "Adaptive" wide, "Low" narrow, and the row hugging the
-        // left edge under a centred mode row.
+        // Strength only exists inside ANC. Hand-rolled so the four chips flex
+        // evenly (ButtonGroup sizes each to its label).
         Row {
           id: strengthRow
-          visible: root.ready && root.connected && root.mode === "anc"
+          visible: root.setupComplete && root.connected && root.mode === "anc"
           width: parent.width
           spacing: Style.space(6)
 
@@ -656,24 +824,20 @@ Panel {
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
 
         PanelSectionHeader {
-          visible: root.connected && root.ready
+          visible: root.connected && root.setupComplete
           text: "Battery"
           foreground: root.foreground
           fontFamily: root.fontFamily
         }
 
-        // Tiles rather than label/value rows: the meter turns three numbers
-        // into something readable at a glance, which is the only question
-        // anyone opens this panel to answer.
+        // Tiles: the meter is readable at a glance.
         Row {
           id: batteryRow
-          visible: root.connected && root.ready
+          visible: root.connected && root.setupComplete
           width: parent.width
           spacing: Style.space(8)
 
-          // The case only reports while it is connected, which it is not
-          // while the buds are out of it. A permanent "—" tile would read as
-          // broken hardware, so it earns its space only when it has a value.
+          // The case only reports while connected; a permanent "—" would read as broken.
           readonly property bool hasCase: typeof root.state.case === "number"
           readonly property int tiles: hasCase ? 3 : 2
           readonly property real tileWidth:
@@ -692,14 +856,14 @@ Panel {
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
 
         PanelSectionHeader {
-          visible: root.connected && root.ready
+          visible: root.connected && root.setupComplete
           text: "Playback"
           foreground: root.foreground
           fontFamily: root.fontFamily
         }
 
         Toggle {
-          visible: root.connected && root.ready
+          visible: root.connected && root.setupComplete
           width: parent.width
           label: "Low lag mode"
           description: "Lower audio delay for games"
@@ -711,7 +875,7 @@ Panel {
         }
 
         Toggle {
-          visible: root.connected && root.ready
+          visible: root.connected && root.setupComplete
           width: parent.width
           label: "In-ear detection"
           description: "Pause when a bud is removed"
@@ -726,8 +890,8 @@ Panel {
 
         Button {
           width: parent.width
-          enabled: root.connected && root.ready
-          opacity: root.connected && root.ready ? 1.0 : 0.45
+          enabled: root.connected && root.setupComplete
+          opacity: root.connected && root.setupComplete ? 1.0 : 0.45
           text: ringTimer.running ? "Stop" : "Find"
           iconText: "󰂚"
           tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds"
@@ -736,6 +900,16 @@ Panel {
           accent: root.foreground
           fontFamily: root.fontFamily
           onClicked: ringTimer.running ? root.stopRing() : root.ring()
+        }
+
+        Text {
+          visible: root.configNotice !== "" && root.setupComplete
+          width: parent.width
+          text: root.configNotice
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
         }
       }
     }
@@ -747,9 +921,7 @@ Panel {
     property string value: ""
     property string label: ""
 
-    // ear-slash = outside sound blocked, ear = outside sound let in,
-    // prohibit = nothing applied, which is also the mark Nothing X uses
-    // for Off.
+    // ear-slash blocks, ear lets through, prohibit is off (as in Nothing X).
     readonly property string iconName: value === "trans" ? "ear"
       : (value === "off" ? "prohibit" : "ear-slash")
 
@@ -809,8 +981,7 @@ Panel {
 
     readonly property bool known: typeof value === "number"
     readonly property real fraction: known ? Math.max(0, Math.min(1, value / 100)) : 0
-    // Matches the shell's own battery convention: urgent below 20, dimmed
-    // when there is no reading at all.
+    // Shell battery convention: urgent below 20, dim when unknown.
     readonly property color tone: !known ? root.dim
       : (value <= 20 ? root.urgent : root.foreground)
 
@@ -874,8 +1045,7 @@ Panel {
           Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
           Behavior on color { ColorAnimation { duration: 220 } }
 
-          // Same pulse the power panel uses while charging: a moving signal
-          // that energy is flowing in, rather than a static bar.
+          // Same pulse the power panel uses while charging.
           SequentialAnimation on opacity {
             running: root.state.charging === true && root.opened
             loops: Animation.Infinite

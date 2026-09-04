@@ -3,16 +3,10 @@ import QtQuick.Shapes
 import qs.Commons
 import qs.Ui
 
-// Phosphor icons (MIT), regular weight, rendered from their own path data.
-//
-// The path strings below are lifted verbatim from phosphor-icons/core, so
-// these are the real icons rather than approximations. They are drawn through
-// QtQuick.Shapes instead of loading .svg files: Qt's SVG renderer is
-// unreliable at small sizes, and this keeps the plugin self-contained with no
-// asset files to ship or lose.
-//
-// Every Phosphor icon is authored on a 256x256 canvas, so one scale factor
-// maps any of them to the requested size.
+// Phosphor icons (MIT), regular weight. Path data is verbatim from
+// phosphor-icons/core, drawn through QtQuick.Shapes rather than .svg files:
+// Qt's SVG renderer is unreliable at small sizes. All icons share a 256
+// canvas, so one scale factor fits any size.
 Item {
   id: root
 
@@ -38,11 +32,8 @@ Item {
   implicitWidth: iconSize
   implicitHeight: iconSize
 
-  // Sized to Phosphor's own 256 canvas and scaled down, rather than sized to
-  // the icon and scaled up. Note there is deliberately no layer.enabled here:
-  // a layer rasterises the Shape at the item's size BEFORE the transform
-  // runs, which clips 256-unit paths down to nothing. CurveRenderer gives the
-  // antialiasing the layer would otherwise have provided.
+  // Drawn at the 256 canvas and scaled down. No layer.enabled: a layer
+  // rasterises at the item's size before the transform and clips the path.
   Shape {
     width: root.canvas
     height: root.canvas

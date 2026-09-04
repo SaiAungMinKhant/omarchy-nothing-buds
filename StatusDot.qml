@@ -2,15 +2,8 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Small state light worn by the bar icon. Its own file rather than a colour
-// swap on the glyph because the bar has no other cue for the mode: a plain
-// headphones mark tells you nothing about whether ANC is on.
-//
-// Shape carries the state, not just colour: filled for ANC, hollow for
-// transparency, drained when off or disconnected. That survives a monochrome
-// bar and a colour-blind reader.
-//
-// Generic shapes, no brand reference.
+// State light for the bar icon. Shape carries the state, not just colour:
+// filled for ANC, hollow for transparency, drained when off or disconnected.
 Item {
   id: root
 
