@@ -3,10 +3,10 @@
 # Installs what the plugin needs outside its QML folder. Nothing happens
 # without consent: the panel passes --yes (the click), a terminal run gets a
 # y/N prompt. Every created object is recorded in the manifest and rolled
-# back on failure, except a package yay already installed (undoing it would
-# need the same password). earctl is resolved first because it alone may
-# need a terminal. --check reports whether everything is installed and
-# current (wrapper byte-identical to the shipped one) and changes nothing.
+# back on failure. earctl is resolved first because its source build needs
+# a terminal for progress and errors. --check reports whether everything is
+# installed and current (wrapper byte-identical to the shipped one) and changes
+# nothing.
 #
 # Exit codes:
 #   0  done
@@ -50,7 +50,7 @@ usage() {
     "  $NB_WRAPPER        the earbuds helper command" \
     "  $NB_UNIT           systemd --user service (earctl RFCOMM server)" \
     "  $NB_CONF_DIR/            config: pinned earbuds address, RFCOMM channel" \
-    "  earctl                   Nothing RFCOMM tool, from the AUR or source" \
+    "  earctl                   Nothing RFCOMM tool, from pinned source (Git and Rust required)" \
     "" \
     "--yes                skip the confirmation prompt (used by the panel," \
     "                    where the click on \"Set up\" is the confirmation)" \
@@ -134,18 +134,10 @@ fi
 
 if [[ -z $NB_EARCTL_PATH ]]; then
   if ! interactive; then
-    # May need a password, and there is no terminal to type it in.
+    # Keep the potentially lengthy source build in a terminal with visible progress.
     nb_fail 2 "earctl is not installed and this is not a terminal"
   fi
-  if [[ -x $NB_YAY ]]; then
-    say "Installing earctl from the AUR"
-    $NB_YAY -S --needed earctl || nb_fail 2 "earctl install failed; re-run when fixed"
-    [[ -f $NB_EARCTL_FALLBACK && -x $NB_EARCTL_FALLBACK ]] ||
-      nb_fail 2 "yay finished but $NB_EARCTL_FALLBACK is missing"
-    nb_manifest_set pkg earctl || nb_fail 6 "could not record manifest"
-    NB_EARCTL_PATH=$NB_EARCTL_FALLBACK
-    NB_EARCTL_OURS=pkg
-  elif earctl_cargo=$(nb_cargo); then
+  if earctl_cargo=$(nb_cargo); then
     say "Building earctl $earctl_commit from source"
     build_tmp=$($NB_MKTEMP -d) || nb_fail 6 "mktemp failed"
 
@@ -160,7 +152,7 @@ if [[ -z $NB_EARCTL_PATH ]]; then
     [[ $got == "$earctl_commit" ]] ||
       nb_fail 2 "earctl checkout is $got, expected $earctl_commit"
 
-    (cd "$build_tmp/earctl" && "$earctl_cargo" build --release) ||
+    (cd "$build_tmp/earctl" && "$earctl_cargo" build --release --locked) ||
       nb_fail 2 "earctl build failed"
 
     # Same ownership checks as everywhere else: a foreign ~/.local/bin/earctl is refused.
@@ -168,7 +160,7 @@ if [[ -z $NB_EARCTL_PATH ]]; then
     NB_EARCTL_PATH=$NB_BIN_DIR/earctl
     NB_EARCTL_OURS=file
   else
-    nb_fail 2 "need either yay (AUR) or a rust toolchain to install earctl"
+    nb_fail 2 "need a Rust toolchain to build pinned earctl; install Rust and re-run"
   fi
 fi
 

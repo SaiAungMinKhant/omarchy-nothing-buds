@@ -232,7 +232,12 @@ cmd_status() {
   latency=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency get 2>/dev/null | $NB_HEAD -c 8192)
   inear=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear get 2>/dev/null | $NB_HEAD -c 8192)
 
-  valid_json "$anc" && valid_json "$battery" ||
+  # earctl serializes AncLevel as a JSON string, not an object.
+  $NB_JQ -e 'type == "string" and
+    (. == "off" or . == "transparency" or . == "noise_cancellation_low" or
+     . == "noise_cancellation_mid" or . == "noise_cancellation_high" or
+     . == "noise_cancellation_adaptive")' >/dev/null 2>&1 <<<"$anc" &&
+    valid_json "$battery" ||
     { $NB_JQ -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'; return 0; }
   valid_json "$latency" || latency='{"low_latency_enabled":null}'
   valid_json "$inear" || inear='{"detection_enabled":null}'

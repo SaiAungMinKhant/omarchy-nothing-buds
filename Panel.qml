@@ -100,8 +100,8 @@ Panel {
     bootstrapProc.start([setupScript, "--yes"])
   }
 
-  // A real terminal, so the installer can prompt and yay can ask for a
-  // password. Detached; the poll below notices when it finishes.
+  // A real terminal, so the installer can prompt and show build progress.
+  // Detached; the poll below notices when it finishes.
   function installEarctl() {
     Quickshell.execDetached([launchTui, setupScript])
   }
@@ -621,9 +621,9 @@ Panel {
             text: "Setup installs a few things outside this plugin's folder:\n"
                 + "the earbuds command in ~/.local/bin, a systemd --user\n"
                 + "service that talks to the earbuds, and a small config in\n"
-                + "~/.config/earbuds. Nothing runs as root. earctl itself may\n"
-                + "need your password; if it is missing, setup stops and offers\n"
-                + "a terminal."
+                + "~/.config/earbuds. Nothing runs as root. If earctl is missing,\n"
+                + "setup offers a terminal to build it from pinned source.\n"
+                + "Git and a Rust toolchain are required for the build."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -665,8 +665,8 @@ Panel {
             visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
             width: parent.width
             text: "Everything is installed except earctl, which talks to "
-                + "the earbuds. Installing it may ask for your password, "
-                + "so it needs a terminal."
+                + "the earbuds. Setup builds it from pinned source in a terminal. "
+                + "Git and a Rust toolchain are required; no password is needed."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall

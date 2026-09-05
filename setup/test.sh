@@ -2,7 +2,7 @@
 
 # Evidence for the marketplace security review. Runs installer, uninstaller
 # and wrapper inside a throwaway HOME with fake bluetoothctl/systemctl/yay/
-# earctl: no real units, packages, network or root. coreutils, jq and
+# earctl/git/cargo: no real units, packages, network or root. coreutils, jq and
 # /usr/bin/timeout stay real.
 #
 # Subject scripts are copied into a sandbox with two asserted edits: the
@@ -46,7 +46,8 @@ H=""
 new_home() {
   HN=$((HN+1))
   H=$T/home$HN
-  /usr/bin/mkdir -p -- "$H"
+  /usr/bin/mkdir -p -- "$H/.cargo/bin"
+  /usr/bin/ln -s -- "$FAKE/rustup" "$H/.cargo/bin/cargo"
 }
 
 run_install() { # -- install.sh args...
@@ -90,6 +91,7 @@ for f in lib.sh earbuds; do
     -e "s|^NB_SYSTEMCTL=.*|NB_SYSTEMCTL=$FAKE/systemctl|" \
     -e "s|^NB_PACMAN=.*|NB_PACMAN=$FAKE/pacman|" \
     -e "s|^NB_YAY=.*|NB_YAY=$FAKE/yay|" \
+    -e "s|^NB_GIT=.*|NB_GIT=$FAKE/git|" \
     -e "s|^NB_EARCTL_FALLBACK=.*|NB_EARCTL_FALLBACK=$FAKE/earctl|" \
     "$SUBJ/$f"
 done
@@ -179,7 +181,7 @@ if [[ $1 == anc && $2 == get && -f "__FAKE__/anc-fail-first" && ! -f "__FAKE__/a
   exit 1
 fi
 case $1 in
-  anc)    if [[ $2 == get ]]; then echo '{"noise_cancellation":{"mode":"noise_cancellation","level":"high"}}'; fi ;;
+  anc)    if [[ $2 == get ]]; then echo '"noise_cancellation_high"'; fi ;;
   battery) echo '{"left":{"Level":{"percent":80,"charging":false}},"right":{"Level":{"percent":75,"charging":false}},"case":{"Level":{"percent":60,"charging":false}}}' ;;
   latency) if [[ $2 == get ]]; then echo '{"low_latency_enabled":false}'; fi ;;
   in-ear)  if [[ $2 == get ]]; then echo '{"detection_enabled":true}'; fi ;;
@@ -221,7 +223,37 @@ echo "pacman \$*" >> "$FAKE/log"
 exit 0
 EOF
 
-for f in bluetoothctl systemctl yay pacman; do
+# Git and Cargo fakes exercise the source path without network or compilation.
+cat >"$FAKE/git" <<'EOF'
+#!/bin/bash
+fake=$(/usr/bin/dirname -- "$0")
+echo "git $*" >>"$fake/log"
+[[ ! -f "$fake/git-fail" ]] || exit 1
+if [[ $1 == init ]]; then
+  /usr/bin/mkdir -p -- "$3"
+elif [[ $3 == rev-parse ]]; then
+  if [[ -f "$fake/git-wrong-head" ]]; then
+    echo 0000000000000000000000000000000000000000
+  else
+    echo 81b24e15ffa12d04ddad957e8ac0da557e37b38d
+  fi
+fi
+EOF
+
+cat >"$FAKE/rustup" <<'EOF'
+#!/bin/bash
+# Like rustup, dispatch by the name used to invoke the proxy.
+[[ ${0##*/} == cargo ]] || exit 1
+fake=$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "$0")")
+echo "cargo $*" >>"$fake/log"
+[[ $* == "build --release --locked" ]] || exit 1
+[[ ! -f "$fake/cargo-fail" ]] || exit 1
+/usr/bin/mkdir -p target/release
+/usr/bin/sed "s|__FAKE__|$fake|g" "$fake/earctl.real" >target/release/earctl
+/usr/bin/chmod 755 target/release/earctl
+EOF
+
+for f in bluetoothctl systemctl yay pacman git rustup; do
   /usr/bin/chmod 755 "$FAKE/$f"
 done
 
@@ -264,7 +296,7 @@ assert_eq "pinned address" "$(/usr/bin/cat "$H/.config/earbuds/address")" "AA:BB
 assert_line "unit execs the resolved earctl" \
   "^ExecStart=$FAKE/earctl server --addr 127.0.0.1:8787\$" "$H/.config/systemd/user/earctl.service"
 assert_no_line "no placeholder left in the unit" "%EARCTL%" "$H/.config/systemd/user/earctl.service"
-assert_eq "earctl-bin records the AUR path" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-bin")" "$FAKE/earctl"
+assert_eq "earctl-bin records the existing dependency path" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-bin")" "$FAKE/earctl"
 M=$(manifest_of)
 assert_line "manifest records wrapper" "file$(/usr/bin/printf '\t')$H/.local/bin/earbuds" "$M"
 assert_line "manifest records unit" "file$(/usr/bin/printf '\t')$H/.config/systemd/user/earctl.service" "$M"
@@ -299,7 +331,7 @@ assert_gone "wrapper not installed" "$H/.local/bin/earbuds"
 assert_gone "unit not installed" "$H/.config/systemd/user/earctl.service"
 assert_gone "state dir rolled back" "$H/.local/state/io.github.saiaungminkhant.nothing-buds"
 
-step "S5: interactive terminal install: consent + AUR earctl + full install"
+step "S5: interactive install builds pinned source even with yay available"
 new_home
 log_reset
 /usr/bin/rm -f -- "$FAKE/earctl"
@@ -308,32 +340,69 @@ rc=$?
 assert_rc "consented terminal install" 0 "$rc"
 assert_exists "wrapper" "$H/.local/bin/earbuds"
 assert_exists "unit" "$H/.config/systemd/user/earctl.service"
-assert_exists "earctl via yay" "$FAKE/earctl"
+assert_exists "built earctl" "$H/.local/bin/earctl"
 M=$(manifest_of)
-assert_line "manifest records the package" "pkg$(printf '\t')earctl" "$M"
-assert_line "yay installed earctl" "yay -S --needed earctl" "$FAKE/log"
+assert_line "manifest records the binary" "file$(printf '\t')$H/.local/bin/earctl" "$M"
+assert_no_line "no package ownership recorded" "^pkg" "$M"
+assert_no_line "yay never invoked despite being available" "yay" "$FAKE/log"
+assert_line "exact commit fetched" "fetch -q --depth 1 origin 81b24e15ffa12d04ddad957e8ac0da557e37b38d" "$FAKE/log"
+assert_line "detached checkout" "checkout -q --detach 81b24e15ffa12d04ddad957e8ac0da557e37b38d" "$FAKE/log"
+assert_line "HEAD verified" "rev-parse HEAD" "$FAKE/log"
+assert_line "locked build through the Cargo proxy" "cargo build --release --locked" "$FAKE/log"
+assert_eq "earctl-bin records built binary" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-bin")" "$H/.local/bin/earctl"
+assert_line "unit uses built binary" "^ExecStart=$H/.local/bin/earctl server" "$H/.config/systemd/user/earctl.service"
 
-step "S5b: uninstall removes the recorded package; --keep-earctl keeps it"
+step "S5b: uninstall removes the recorded binary; --keep-earctl keeps it"
 log_reset
 run_uninstall --yes
-rc=$?
-assert_rc "uninstall with package" 0 "$rc"
-assert_gone "earctl package removed" "$FAKE/earctl"
-assert_line "package removed through yay" "yay -Rns earctl" "$FAKE/log"
+assert_rc "uninstall with built binary" 0 "$?"
+assert_gone "earctl binary removed" "$H/.local/bin/earctl"
+assert_no_line "no package manager invoked" "yay" "$FAKE/log"
 assert_gone "state dir" "$H/.local/state/io.github.saiaungminkhant.nothing-buds"
 
 new_home
 log_reset
-/usr/bin/rm -f -- "$FAKE/earctl"
 run_pty install.sh
-rc=$?
-assert_rc "second terminal install" 0 "$rc"
+assert_rc "second terminal install" 0 "$?"
 log_reset
 run_uninstall --yes --keep-earctl
-rc=$?
-assert_rc "uninstall keeping earctl" 0 "$rc"
-assert_exists "earctl kept" "$FAKE/earctl"
+assert_rc "uninstall keeping earctl" 0 "$?"
+assert_exists "earctl kept" "$H/.local/bin/earctl"
 assert_no_line "no package removal attempted" "-Rns" "$FAKE/log"
+
+step "S5c: source failures abort without publishing files or falling back to yay"
+for failure in git-fail git-wrong-head cargo-fail systemctl-fail-enable; do
+  new_home
+  log_reset
+  touch "$FAKE/$failure"
+  run_pty install.sh
+  rc=$?
+  /usr/bin/rm -f -- "$FAKE/$failure"
+  expected=2
+  [[ $failure != systemctl-fail-enable ]] || expected=6
+  assert_rc "$failure aborts install" "$expected" "$rc"
+  assert_gone "$failure leaves no binary" "$H/.local/bin/earctl"
+  assert_gone "$failure leaves no wrapper" "$H/.local/bin/earbuds"
+  assert_gone "$failure leaves no unit" "$H/.config/systemd/user/earctl.service"
+  assert_gone "$failure rolls state back" "$H/.local/state/io.github.saiaungminkhant.nothing-buds"
+  assert_no_line "$failure never falls back to yay" "yay" "$FAKE/log"
+  if [[ $failure == git-* ]]; then
+    assert_no_line "$failure never runs Cargo" "cargo" "$FAKE/log"
+  fi
+done
+
+step "S5d: version 0.0.2 package ownership still supports uninstall"
+new_home
+log_reset
+make_earctl
+run_install --yes
+assert_rc "install existing package fixture" 0 "$?"
+M=$(manifest_of)
+printf 'pkg\tearctl\n' >>"$M"
+run_uninstall --yes
+assert_rc "legacy package uninstall" 0 "$?"
+assert_gone "legacy package removed" "$FAKE/earctl"
+assert_line "legacy package removed through yay" "yay -Rns earctl" "$FAKE/log"
 
 step "S6: pre-existing symlink at the wrapper path is refused, not followed"
 new_home
@@ -476,6 +545,7 @@ t0=$SECONDS
 out=$(wrap status)
 cost=$((SECONDS - t0))
 assert_rc "connected status" 0 "$rc"
+assert_eq "ANC string preserved" "$(echo "$out" | /usr/bin/jq -r .anc)" "noise_cancellation_high"
 assert_eq "battery left" "$(echo "$out" | /usr/bin/jq -r .left)" "80"
 assert_eq "battery case" "$(echo "$out" | /usr/bin/jq -r .case)" "60"
 assert_eq "in-ear read" "$(echo "$out" | /usr/bin/jq -r .in_ear)" "true"

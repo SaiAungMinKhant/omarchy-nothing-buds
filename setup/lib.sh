@@ -79,14 +79,15 @@ nb_is_shipped_sha() {
   return 1
 }
 
-# ~/.cargo/bin/cargo is a rustup symlink by design: resolve it, require a regular file.
+# ~/.cargo/bin/cargo is a rustup symlink by design: validate its target,
+# but invoke the cargo path so rustup selects its Cargo proxy.
 nb_cargo() {
   local c resolved
   for c in "$HOME/.cargo/bin/cargo" /usr/bin/cargo; do
     [[ -e $c ]] || continue
     resolved=$($NB_READLINK -f -- "$c" 2>/dev/null) || continue
     [[ -f $resolved && -x $resolved ]] || continue
-    printf '%s\n' "$resolved"
+    printf '%s\n' "$c"
     return 0
   done
   return 1

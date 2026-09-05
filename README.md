@@ -27,7 +27,7 @@ check the [RFCOMM channel](#rfcomm-channel) first.
 
 | | |
 |---|---|
-| [earctl](https://github.com/DaanHessen/earctl) | Speaks the Nothing RFCOMM protocol. AGPL-3.0. This plugin calls it as a separate program over its local HTTP API and does not bundle it. The source-build path is pinned to the exact commit behind v0.1.2 |
+| [earctl](https://github.com/DaanHessen/earctl) | Speaks the Nothing RFCOMM protocol. AGPL-3.0. This plugin calls it as a separate program over its local HTTP API and does not bundle it. Setup builds missing earctl from the exact commit behind v0.1.2, using its Cargo.lock |
 | `bluez-utils` | `bluetoothctl`, for link state and connect/disconnect |
 | `jq` | The wrapper builds its JSON output with it |
 
@@ -56,10 +56,18 @@ What that click installs:
 - a pinned earbuds address in `~/.config/earbuds`,
 - earctl itself, if it is not already on the machine.
 
-Nothing runs as root. earctl is the one exception to "no password": if it is
-missing, setup stops without touching anything else and the panel offers an
-"Install earctl" button that opens a terminal, where the installer prints its
-plan and asks `Proceed? [y/N]` before doing anything.
+Nothing runs as root and installation never asks for a password. If earctl is
+missing, setup stops and the panel offers an "Install earctl" button that
+opens a terminal, where the installer prints its plan and asks
+`Proceed? [y/N]` before doing anything. Have Git, a Rust toolchain (Cargo),
+and the native build dependencies for earctl available first.
+
+Missing earctl is always built from commit
+`81b24e15ffa12d04ddad957e8ac0da557e37b38d`. Setup fetches that exact commit,
+checks it out detached, verifies HEAD, and runs `cargo build --release --locked`
+so dependency resolution must match the committed lockfile. The binary goes
+into `~/.local/bin/earctl`. Setup never installs an AUR package, even when
+`yay` is available. An existing earctl is reused as a user-provided dependency.
 
 Every file is written atomically (temp file + rename, never through a
 symlink), recorded in a manifest at
@@ -113,10 +121,11 @@ hash, not currently a symlink. Files you edited are left alone, directories
 are removed only when empty, and an earctl this plugin never installed is
 never touched. The manifest itself and the backups go too.
 
-earctl goes the way it came: the AUR package through the package manager
-(`yay -Rns`, the one step that may ask for a password), or the built binary
-by exact recorded path. Pass `--keep-earctl` if something else on your system
-uses it.
+The built earctl binary is removed by exact recorded path and hash. For
+compatibility with version 0.0.2, an earctl package recorded by that version
+is still removed through the package manager (`yay -Rns`, which may ask for
+a password). New installations never create package records. Pass
+`--keep-earctl` if something else on your system uses it.
 
 Installs made before the manifest existed get the safe subset: only the
 wrapper and unit are removed, and only if their content still matches a
@@ -180,10 +189,11 @@ same earbuds. They are gaps in earctl.
 
 ## Security
 
-The marketplace review asked for four things, and this is where each lives:
+The marketplace review requirements are addressed here:
 
 | Requirement | Mechanism |
 |---|---|
+| Dependency installation must use the reviewed source | Missing earctl is built only from the full commit above, with detached checkout and HEAD verification before Cargo runs. `--locked` requires the committed dependency lockfile. There is no AUR installation path. S5, S5c |
 | Setup must be an explicit, consented action; no overwriting objects the plugin cannot prove it owns | Setup runs only from the panel's "Set up" click (`--yes`) or a y/N prompt in a terminal. `setup/lib.sh` installs through `nb_install_file`: symlinked targets are refused, pre-existing files are refused unless recorded in the manifest or byte-identical to a version shipped here, replaced files are backed up, and everything is published by atomic rename. The panel only ever probes with `install.sh --check`, which is read-only. `bash setup/test.sh` S1, S6, S7, S9, S15, S16 |
 | Uninstall must remove only what this installation created | A manifest at `~/.local/state/io.github.saiaungminkhant.nothing-buds/` records every file, directory and package created. Removal is hash-checked, symlink-checked, empty-dir-only, and never recurses by inference. Legacy installs get content-matching only. S3, S8, S11, S12 |
 | Helper calls need deadlines and output caps; a hung or noisy helper must not wedge the panel | Every wrapper call is wrapped in `/usr/bin/timeout` with byte caps on consumed output, and each helper runs in its own process group so a forked grandchild dies with it; the panel wraps every operation in `/usr/bin/timeout --kill-after=5 <deadline>`, streams stdout/stderr through capped parsers, and a watchdog plus supersession rules guarantee `busy`/link state always clears. S13 |

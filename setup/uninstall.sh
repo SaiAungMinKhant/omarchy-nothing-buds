@@ -228,6 +228,11 @@ if [[ $manifest_mode == true ]]; then
 
   for (( i = ${#owned_dirs[@]} - 1; i >= 0; i-- )); do
     [[ -d ${owned_dirs[$i]} ]] || continue
+    # A deliberately kept source binary also needs its parent directories.
+    if [[ $keep_earctl == true && -e $NB_BIN_DIR/earctl &&
+          $NB_BIN_DIR/earctl == "${owned_dirs[$i]}/"* ]]; then
+      continue
+    fi
     $NB_RMDIR -- "${owned_dirs[$i]}" 2>/dev/null ||
       { note "  leaving ${owned_dirs[$i]} behind: not empty"; partial=1; }
   done
