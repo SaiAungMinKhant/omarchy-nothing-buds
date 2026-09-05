@@ -301,15 +301,15 @@ Panel {
       bp.live = true
       bp.command = ["/usr/bin/timeout", "--kill-after=5", bp.deadline].concat(args)
       bp.running = true
-      watch.interval = (parseInt(bp.deadline, 10) + 8) * 1000
-      watch.restart()
+      bp.watchdog.interval = (parseInt(bp.deadline, 10) + 8) * 1000
+      bp.watchdog.restart()
     }
 
     // Abandon in-flight and queued work; used on destruction.
     function stop() {
       bp.pendingArgs = null
       bp.live = false
-      watch.stop()
+      bp.watchdog.stop()
       bp.running = false
     }
 
@@ -333,7 +333,7 @@ Panel {
     stderr: SplitParser { onRead: function(line) { bp.take(line, true) } }
 
     onExited: function(exitCode, exitStatus) {
-      watch.stop()
+      bp.watchdog.stop()
       var wasLive = bp.live
       bp.live = false
       if (bp.pendingArgs !== null) {
@@ -349,8 +349,9 @@ Panel {
         bp.onDone(exitCode, bp.overflowed ? "" : bp.outBuf, bp.errBuf, !killed && exitCode === 0)
     }
 
-    Timer {
-      id: watch
+    // Process has no default child property. Keep the watchdog in an explicit
+    // object-valued property so the component can be instantiated by QML.
+    property Timer watchdog: Timer {
       interval: 38000
       onTriggered: {
         // The binary timeout should have fired long before this; this exists so

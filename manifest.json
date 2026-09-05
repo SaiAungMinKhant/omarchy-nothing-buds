@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.saiaungminkhant.nothing-buds",
   "name": "Nothing Buds",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "author": "Sai Aung Min Khant",
   "license": "MIT",
   "description": "ANC, battery and playback controls for Nothing and CMF earbuds",
