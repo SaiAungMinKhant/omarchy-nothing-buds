@@ -103,14 +103,14 @@ assert_eq "earbuds bluetoothctl rewritten" \
 assert_eq "earbuds earctl fallback rewritten" \
   "$(/usr/bin/grep -c "^NB_EARCTL_FALLBACK=$FAKE/earctl$" "$SUBJ/earbuds")" "1"
 
-# Stand-in for the 1.0.0 wrapper (its bytes are not in this repo).
+# Stand-in for the 0.0.1 wrapper (its bytes are not in this repo).
 printf '#!/bin/bash\n# legacy wrapper from a pre-manifest release\necho legacy\n' >"$FAKE/legacy-earbuds"
 LEGACY_SHA=$(/usr/bin/sha256sum -- "$FAKE/legacy-earbuds" | /usr/bin/cut -d' ' -f1)
 printf 'NB_SHIPPED_SHAS+=(%s)\n' "$LEGACY_SHA" >>"$SUBJ/lib.sh"
 assert_eq "lib.sh legacy hash injected" \
   "$(/usr/bin/grep -c "^NB_SHIPPED_SHAS+=($LEGACY_SHA)$" "$SUBJ/lib.sh")" "1"
 
-# The 1.0.0 unit, byte for byte; its hash is in lib.sh's list.
+# The 0.0.1 unit, byte for byte; its hash is in lib.sh's list.
 cat >"$FAKE/legacy-unit" <<'EOF_UNIT'
 [Unit]
 Description=earctl RFCOMM server for Nothing/CMF earbuds
@@ -126,7 +126,7 @@ RestartSec=5
 [Install]
 WantedBy=graphical-session.target
 EOF_UNIT
-assert_eq "legacy unit reproduces the 1.0.0 hash" \
+assert_eq "legacy unit reproduces the 0.0.1 hash" \
   "$(/usr/bin/sha256sum -- "$FAKE/legacy-unit" | /usr/bin/cut -d' ' -f1)" \
   "549b60883eb69893e7f8200c83e10b8852a0537c032ae0fe9cca82907aa55d58"
 
@@ -441,7 +441,7 @@ run_uninstall --yes
 rc=$?
 assert_rc "legacy uninstall" 0 "$rc"
 assert_gone "legacy wrapper (content matched)" "$H/.local/bin/earbuds"
-assert_gone "legacy 1.0.0 unit (hash matched)" "$H/.config/systemd/user/earctl.service"
+assert_gone "legacy 0.0.1 unit (hash matched)" "$H/.config/systemd/user/earctl.service"
 assert_exists "legacy config left alone" "$H/.config/earbuds/channel"
 assert_exists "legacy earctl left alone" "$FAKE/earctl"
 

@@ -4,7 +4,7 @@
 # every removal is driven by the manifest, never by inference. Run BEFORE
 # `omarchy plugin remove`, which deletes only the plugin directory.
 #
-# Without a manifest (pre-1.1.0 installs) only the wrapper and unit are
+# Without a manifest (pre-0.0.2 installs) only the wrapper and unit are
 # removed, and only if their bytes match a version this plugin shipped.
 # earctl goes the way it came (package or recorded binary) unless
 # --keep-earctl; one we never installed is left alone.

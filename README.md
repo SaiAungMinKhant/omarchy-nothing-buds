@@ -90,7 +90,7 @@ Run by hand it prints its plan and asks before proceeding, and installs earctl
 too, since it has a terminal to work with. A failed run rolls back everything
 it did, restoring backups.
 
-**Upgrading from before the manifest existed** (release 1.0.0): the panel
+**Upgrading from before the manifest existed** (version 0.0.1): the panel
 shows "Set up now" again, because the installed wrapper is out of date. The
 installer recognises the old wrapper and unit by hash (`NB_SHIPPED_SHAS` in
 `setup/lib.sh`), so the click replaces them with backups and records a

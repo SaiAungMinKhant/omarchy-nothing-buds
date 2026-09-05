@@ -59,8 +59,8 @@ NB_RM=/usr/bin/rm
 NB_RMDIR=/usr/bin/rmdir
 
 # sha256 of every wrapper and unit shipped before the manifest existed
-# (release 1.0.0). A match only ever permits replacing or removing the file.
-# Closed list: every release from 1.1.0 on records a manifest.
+# (version 0.0.1). A match only ever permits replacing or removing the file.
+# Closed list: every version from 0.0.2 on records a manifest.
 NB_SHIPPED_SHAS=(
   # setup/earbuds
   1436d9267ce4bf4e377d54ff4f79b7c6e9b31f141939a9c8c3047ec523121268
