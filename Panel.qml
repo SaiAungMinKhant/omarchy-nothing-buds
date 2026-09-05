@@ -18,7 +18,17 @@ import "Model.js" as Model
 Panel {
   id: root
   moduleName: "io.github.saiaungminkhant.nothing-buds"
-  ipcTarget: "io.github.saiaungminkhant.nothing-buds"
+  manageIpc: false
+
+  property var anchorItem: null
+  property var hostWidget: null
+  readonly property var barIdentity: hostWidget || root
+
+  function switchPanel(direction) {
+    if (root.bar && typeof root.bar.switchPanelFrom === "function")
+      return root.bar.switchPanelFrom(root.barIdentity, direction)
+    return false
+  }
 
   // Last successful reading; connected:false is a valid state.
   property var state: ({ connected: false, paired: false })
@@ -183,11 +193,6 @@ Panel {
     { value: "nc-high",  label: "High" },
     { value: "adaptive", label: "Adaptive" }
   ]
-
-  // Always on the bar once enabled; the pill dims rather than hiding.
-  visible: true
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
 
   function apply(raw) {
     root.busy = false
@@ -485,51 +490,10 @@ Panel {
     onTriggered: root.refresh()
   }
 
-  BarIconButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    // Nerd-font ear glyphs are unreadable at bar size.
-    iconComponent: Component {
-      Item {
-        anchors.fill: parent
-
-        PhosphorIcon {
-          anchors.centerIn: parent
-          iconSize: Style.bar.iconCanvas
-          icon: "headphones"
-          color: root.barIconColor
-        }
-
-        StatusDot {
-          anchors.right: parent.right
-          anchors.bottom: parent.bottom
-          // Small and cornered so it does not read as a red earcup.
-          dotSize: Style.space(5)
-          anchors.rightMargin: -Style.space(1)
-          anchors.bottomMargin: -Style.space(1)
-          muted: root.barIconColor
-          // A dead link shows off, not a stale ANC state.
-          mode: root.connected ? root.mode : "off"
-          // Punched out of the bar background.
-          outline: root.bar ? root.bar.background : Color.background
-        }
-      }
-    }
-    tooltipText: root.opened ? ""
-      : (!root.setupComplete ? "Setup required"
-         : (root.paired ? Model.summary(root.state) : "No earbuds paired"))
-
-    onPressed: function(buttonCode) {
-      if (buttonCode === Qt.MiddleButton) root.refresh()
-      else root.toggle()
-    }
-  }
-
   KeyboardPanel {
     id: panel
-    anchorItem: button
-    owner: root
+    anchorItem: root.anchorItem
+    owner: root.barIdentity
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
