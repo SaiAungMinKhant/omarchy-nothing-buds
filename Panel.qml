@@ -93,6 +93,8 @@ Panel {
 
   property bool busy: false
   property string lastError: ""
+  // First click on Find only arms the tone; the second one plays it.
+  property bool ringArmed: false
 
   function probeCmd() { return [setupScript, "--check"] }
 
@@ -226,13 +228,35 @@ Panel {
     setProc.start(root.cmd(["set", "anc", level]))
   }
 
+  // Two steps on purpose: the tone is loud enough to hurt a bud still in an
+  // ear, so the first click only warns and the second one rings.
+  function armRing() {
+    if (!root.connected || !root.setupComplete || ringTimer.running) return
+    root.ringArmed = true
+    ringArmTimer.restart()
+  }
+
+  function disarmRing() {
+    ringArmTimer.stop()
+    root.ringArmed = false
+  }
+
   function ring() {
     if (!root.connected) return
+    root.disarmRing()
     ringProc.start(root.cmd(["ring"]))
     ringTimer.restart()
   }
 
+  // The one click the Find button acts on: warn first, ring on the next one.
+  function toggleRing() {
+    if (ringTimer.running) root.stopRing()
+    else if (root.ringArmed) root.ring()
+    else root.armRing()
+  }
+
   function stopRing() {
+    root.disarmRing()
     ringTimer.stop()
     unringProc.start(root.cmd(["unring"]))
   }
@@ -267,6 +291,11 @@ Panel {
 
   // BlueZ said so; ask the wrapper for details now rather than next poll.
   onLinkUpChanged: Qt.callLater(root.refresh)
+
+  // Closing the panel or losing the buds drops the warning; reopening starts
+  // from Find again.
+  onOpenedChanged: if (!root.opened) root.disarmRing()
+  onConnectedChanged: if (!root.connected) root.disarmRing()
 
   // ------------------------------------------------------------------ setup
   // processes
@@ -449,6 +478,15 @@ Panel {
     onTriggered: root.stopRing()
   }
 
+  // The warning lapses on its own, so a panel left open cannot ring on a
+  // single stray click minutes later.
+  Timer {
+    id: ringArmTimer
+    interval: 6000
+    repeat: false
+    onTriggered: root.ringArmed = false
+  }
+
   // bluetoothctl plus the RFCOMM re-establish take a few seconds.
   BoundedProcess {
     id: linkProc
@@ -508,7 +546,7 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.refresh()
-        else if (t === "f" || t === "F") root.ring()
+        else if (t === "f" || t === "F") root.toggleRing()
         else if (t === "1") root.setMode("off")
         else if (t === "2") root.setMode("trans")
         else if (t === "3") root.setMode("anc")
@@ -853,18 +891,31 @@ Panel {
 
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
 
+        Text {
+          visible: root.ringArmed
+          width: parent.width
+          text: "The tone is loud. Take the buds out of your ears first, "
+              + "then click Ring now."
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
         Button {
           width: parent.width
           enabled: root.connected && root.setupComplete
           opacity: root.connected && root.setupComplete ? 1.0 : 0.45
-          text: ringTimer.running ? "Stop" : "Find"
+          text: ringTimer.running ? "Stop" : (root.ringArmed ? "Ring now" : "Find")
           iconText: "󰂚"
-          tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds"
+          tooltipText: ringTimer.running ? "Stop the tone"
+            : (root.ringArmed ? "Click again to ring both buds"
+                              : "Ring both buds, after a warning")
           bordered: true
           foreground: root.foreground
           accent: root.foreground
           fontFamily: root.fontFamily
-          onClicked: ringTimer.running ? root.stopRing() : root.ring()
+          onClicked: root.toggleRing()
         }
 
         Text {
