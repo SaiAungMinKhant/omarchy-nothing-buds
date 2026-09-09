@@ -22,6 +22,7 @@ set -uo pipefail
 
 NB_BT=/usr/bin/bluetoothctl
 NB_JQ=/usr/bin/jq
+NB_PACTL=/usr/bin/pactl
 NB_TIMEOUT=/usr/bin/timeout
 NB_HEAD=/usr/bin/head
 NB_GREP=/usr/bin/grep
@@ -72,6 +73,11 @@ usage() {
     "  set anc <level>          off | transparency | nc-low | nc-mid | nc-high | adaptive" \
     "  set latency <bool>      low lag mode" \
     "  set in-ear <bool>        in-ear detection" \
+    "  set super-mic <bool>     case Talk-button mic (Ear (3))" \
+    "  set enhanced-bass <bool> [level]   bass enhancement (Ear (3))" \
+    "  set spatial <off|fixed>  spatial audio (Ear (3))" \
+    "  set codec <name>         A2DP codec via PipeWire (ldac|aac|sbc_xq|sbc)" \
+    "  codec                    JSON: active codec and available list" \
     "  cycle                    off -> transparency -> ANC high -> off" \
     "  ring [left|right]        find my buds (the panel bounds the tone)" \
     "  unring                   stop the tone" \
@@ -158,6 +164,11 @@ fi
 
 [[ -n $ADDR ]] || { echo '{"connected":false,"paired":false,"error":"no earbuds found"}'; exit 0; }
 
+# PipeWire card for this device: address uppercased, colons to underscores.
+# The A2DP codec is a host-side setting (pactl profiles), not an earctl one.
+NB_CARD="bluez_card.${ADDR^^}"
+NB_CARD="${NB_CARD//:/_}"
+
 # ------------------------------------------------------------------- earctl
 # Recorded path first, then /usr/bin, then a regular file in ~/.local/bin.
 EARCTL=""
@@ -189,9 +200,16 @@ bt_name()     { bt_info | $NB_SED -n 's/^[[:space:]]*Name: //p' | $NB_HEAD -n 1;
 
 # ----------------------------------------------------------------- session
 
+# Model-gated features (super mic, enhanced bass, spatial) refuse until the
+# session knows the model, which `detect` resolves from the serial. Cheap
+# (~0.2s), idempotent, and failures are non-fatal for models it can't map.
+ensure_model() {
+  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" detect >/dev/null 2>&1 || true
+}
+
 ensure_session() {
   # Probe with a real read: `session` keeps reporting active after the buds disconnect.
-  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && return 0
+  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && { ensure_model; return 0; }
 
   # auto-connect refuses with 409 while a dead session is registered.
   $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1
@@ -200,7 +218,7 @@ ensure_session() {
   local attempt
   for attempt in 1 2 3 4; do
     $NB_TIMEOUT --kill-after=2 10 "$EARCTL" auto-connect --bluetooth-address "$ADDR" --channel "$CHANNEL" >/dev/null 2>&1 &&
-      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && return 0
+      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && { ensure_model; return 0; }
     $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1
     $NB_SLEEP 0.6
   done
@@ -211,6 +229,49 @@ ensure_session() {
 
 valid_json() {
   [[ -n ${1:-} ]] && $NB_JQ -e 'type == "object"' >/dev/null 2>&1 <<<"$1"
+}
+
+# ------------------------------------------------------------------ codec
+# A2DP codec lives in PipeWire, not the earbuds protocol. We read and set it
+# through pactl card profiles. The codec<->profile map is parsed live (which
+# profile is which codec differs by device and PipeWire version).
+
+# Emits one "codec<TAB>profile" line per available A2DP codec for this card.
+codec_map() {
+  $NB_TIMEOUT --kill-after=2 5 "$NB_PACTL" list cards 2>/dev/null | $NB_HEAD -c 65536 | $NB_AWK -v card="$NB_CARD" '
+    $1 == "Name:" { inblk = ($2 == card) }
+    inblk && match($0, /(a2dp-sink[^:]*):.*codec ([A-Za-z0-9_-]+)/, m) {
+      print tolower(m[2]) "\t" m[1]
+    }'
+}
+
+# Active codec name (lowercase), from the running sink.
+codec_active() {
+  $NB_TIMEOUT --kill-after=2 5 "$NB_PACTL" list sinks 2>/dev/null | $NB_HEAD -c 65536 | $NB_AWK '
+    /^\t*Name: bluez_output\./ { inblk = 1 }
+    inblk && /api\.bluez5\.codec/ { gsub(/["]/, ""); print tolower($NF); exit }'
+}
+
+# JSON: {codec: "<active>", codecs: ["ldac","aac",...]} or nulls if unavailable.
+codec_json() {
+  local active list
+  active=$(codec_active)
+  list=$(codec_map | $NB_AWK -F'\t' '{print $1}' |
+         $NB_JQ -R . 2>/dev/null | $NB_JQ -cs . 2>/dev/null)
+  [[ -n $list ]] || list='[]'
+  if [[ -n $active ]]; then
+    $NB_JQ -cn --arg a "$active" --argjson l "$list" '{codec:$a, codecs:$l}'
+  else
+    printf '{"codec":null,"codecs":%s}\n' "$list"
+  fi
+}
+
+codec_set() {
+  local want=${1:-} prof
+  [[ -n $want ]] || return 64
+  prof=$(codec_map | $NB_AWK -F'\t' -v w="${want,,}" '$1 == w {print $2; exit}')
+  [[ -n $prof ]] || { printf 'nothing-buds: codec %s not available\n' "$want" >&2; return 1; }
+  $NB_TIMEOUT --kill-after=2 10 "$NB_PACTL" set-card-profile "$NB_CARD" "$prof" >/dev/null 2>&1
 }
 
 # `connected: false` is a normal state, not an error.
@@ -225,12 +286,17 @@ cmd_status() {
     return 0
   fi
 
-  # Four round trips, about 0.2s. A bad read is absent, not fatal.
-  local anc battery latency inear
+  # A handful of round trips, about 0.2s each. A bad read is absent, not fatal.
+  # The last three are model-gated (Ear (3)); on other models they error fast
+  # and stay null, so the panel simply omits those controls.
+  local anc battery latency inear eq bass supermic
   anc=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_HEAD -c 8192)
   battery=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192)
   latency=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency get 2>/dev/null | $NB_HEAD -c 8192)
   inear=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear get 2>/dev/null | $NB_HEAD -c 8192)
+  eq=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" eq get 2>/dev/null | $NB_HEAD -c 8192)
+  bass=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass get 2>/dev/null | $NB_HEAD -c 8192)
+  supermic=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic get 2>/dev/null | $NB_HEAD -c 8192)
 
   # earctl serializes AncLevel as a JSON string, not an object.
   $NB_JQ -e 'type == "string" and
@@ -241,9 +307,18 @@ cmd_status() {
     { $NB_JQ -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'; return 0; }
   valid_json "$latency" || latency='{"low_latency_enabled":null}'
   valid_json "$inear" || inear='{"detection_enabled":null}'
+  valid_json "$eq" || eq='{"mode":null}'
+  valid_json "$bass" || bass='{"enabled":null,"level":null}'
+  valid_json "$supermic" || supermic='{"enabled":null}'
+
+  local codecinfo
+  codecinfo=$(codec_json)
+  valid_json "$codecinfo" || codecinfo='{"codec":null,"codecs":[]}'
 
   $NB_JQ -cn --argjson anc "$anc" --argjson b "$battery" \
-         --argjson lat "$latency" --argjson ie "$inear" --arg n "$name" '
+         --argjson lat "$latency" --argjson ie "$inear" \
+         --argjson eq "$eq" --argjson bass "$bass" --argjson sm "$supermic" \
+         --argjson ci "$codecinfo" --arg n "$name" '
     def lvl($x): if ($x | type) == "object" and ($x | has("Level"))
                  then $x.Level.percent else null end;
     def chg($x): if ($x | type) == "object" and ($x | has("Level"))
@@ -252,7 +327,13 @@ cmd_status() {
      left: lvl($b.left), right: lvl($b.right), case: lvl($b.case),
      charging: (chg($b.left) or chg($b.right)),
      low_latency: $lat.low_latency_enabled,
-     in_ear: $ie.detection_enabled}'
+     in_ear: $ie.detection_enabled,
+     eq: $eq.mode,
+     enhanced_bass: $bass.enabled,
+     bass_level: $bass.level,
+     super_mic: $sm.enabled,
+     codec: $ci.codec,
+     codecs: $ci.codecs}'
 }
 
 # ---------------------------------------------------------------- commands
@@ -293,6 +374,12 @@ cmd_disconnect() {
 
 # Named setters so the panel never has to know earctl's argument shapes.
 cmd_set() {
+  # Codec is a PipeWire setting, not an earbuds one: no RFCOMM session needed.
+  if [[ ${1:-} == codec ]]; then
+    codec_set "${2:-}"
+    cmd_status
+    return 0
+  fi
   if [[ -z $EARCTL ]] || ! ensure_session; then
     echo '{"connected":false}'
     return 0
@@ -301,6 +388,17 @@ cmd_set() {
     latency) $NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency set "${2:-false}" >/dev/null 2>&1 ;;
     in-ear)  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear set "${2:-false}" >/dev/null 2>&1 ;;
     anc)     $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc set "${2:-off}" >/dev/null 2>&1 ;;
+    super-mic) $NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic set "${2:-false}" >/dev/null 2>&1 ;;
+    enhanced-bass)
+      # Bass and spatial audio are mutually exclusive on the device: setting
+      # one clears the other. Clear spatial FIRST so bass wins (order matters,
+      # the second write is the one that sticks).
+      [[ ${2:-false} == true ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio off >/dev/null 2>&1
+      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled "${2:-false}" --level "${3:-2}" >/dev/null 2>&1 ;;
+    spatial)
+      # Same exclusivity the other way: clear bass first so spatial wins.
+      [[ ${2:-off} == fixed ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled false >/dev/null 2>&1
+      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio "${2:-off}" >/dev/null 2>&1 ;;
     *)       printf 'unknown setting: %s\n' "${1:-}" >&2; return 64 ;;
   esac
   cmd_status
@@ -331,6 +429,7 @@ cmd_cycle() {
 
 case ${1:-status} in
   status)    cmd_status ;;
+  codec)     codec_json ;;
   cycle)     cmd_cycle ;;
   ring)      shift; cmd_ring "$@" ;;
   unring)    cmd_unring ;;

@@ -179,6 +179,23 @@ Panel {
   readonly property bool lowLatency: connected && state.low_latency === true
   readonly property bool inEar: connected && state.in_ear === true
 
+  // Ear (3)-only features. The wrapper reports null on models that don't
+  // support them, so `has*` gates whether the control appears at all.
+  readonly property bool hasSuperMic: connected && typeof state.super_mic === "boolean"
+  readonly property bool superMic: connected && state.super_mic === true
+  readonly property bool hasEnhancedBass: connected && typeof state.enhanced_bass === "boolean"
+  readonly property bool enhancedBass: connected && state.enhanced_bass === true
+  readonly property int bassLevel: connected && typeof state.bass_level === "number" ? state.bass_level : 0
+  // Five levels, confirmed from the app: device byte = level * 2 (2..10).
+  readonly property var bassLevels: [1, 2, 3, 4, 5]
+  // Spatial audio is set-only (the buds expose no getter), so its state is
+  // local intent, not a reading. It can drift if changed from the phone.
+  property bool spatialFixed: false
+
+  // A2DP codec is a host/PipeWire setting, reported by the wrapper via pactl.
+  readonly property string codec: connected && state.codec ? String(state.codec) : ""
+  readonly property var codecs: connected && state.codecs ? state.codecs : []
+
   // Theme bindings as in every first-party panel; 1.55 is the shared "inactive" dim.
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -256,9 +273,46 @@ Panel {
     inEarProc.start(root.cmd(["set", "in-ear", on ? "true" : "false"]))
   }
 
+  function setSuperMic(on) {
+    if (root.busy) return
+    root.busy = true
+    superMicProc.start(root.cmd(["set", "super-mic", on ? "true" : "false"]))
+  }
+
+  // Enabling bass keeps the current level (or 2 the first time). The wrapper
+  // clears spatial when bass turns on; mirror that locally so the tile agrees.
+  function setEnhancedBass(on) {
+    if (root.busy) return
+    root.busy = true
+    if (on) root.spatialFixed = false
+    var lvl = root.bassLevel >= 1 && root.bassLevel <= 5 ? root.bassLevel : 3
+    bassProc.start(root.cmd(["set", "enhanced-bass", on ? "true" : "false", String(lvl)]))
+  }
+
+  function setBassLevel(n) {
+    if (root.busy || n < 1 || n > 5) return
+    root.busy = true
+    root.spatialFixed = false
+    bassProc.start(root.cmd(["set", "enhanced-bass", "true", String(n)]))
+  }
+
+  // Set-only: reflect the intent locally, since status carries no spatial
+  // field. Enabling spatial clears bass on the device (mutual exclusivity).
+  function setSpatial(fixed) {
+    root.spatialFixed = fixed
+    spatialProc.start(root.cmd(["set", "spatial", fixed ? "fixed" : "off"]))
+  }
+
+  function setCodec(name) {
+    if (root.busy || name === "" || name === root.codec) return
+    root.busy = true
+    codecProc.start(root.cmd(["set", "codec", String(name)]))
+  }
+
   function stopAll() {
     var ps = [probeProc, earctlProc, bootstrapProc, statusProc, setProc,
-              ringProc, unringProc, linkProc, latencyProc, inEarProc]
+              ringProc, unringProc, linkProc, latencyProc, inEarProc,
+              superMicProc, bassProc, spatialProc, codecProc]
     for (var i = 0; i < ps.length; i++) ps[i].stop()
   }
 
@@ -481,6 +535,43 @@ Panel {
     }
   }
 
+  BoundedProcess {
+    id: superMicProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
+    }
+  }
+
+  BoundedProcess {
+    id: bassProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
+    }
+  }
+
+  // Spatial has no read-back of its own, but enabling it clears bass on the
+  // device, so re-read to update the bass tile.
+  BoundedProcess {
+    id: spatialProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) { Qt.callLater(root.refresh) }
+  }
+
+  // Codec switch drops and re-adds the A2DP sink; the echoed status reflects it.
+  BoundedProcess {
+    id: codecProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
+      Qt.callLater(root.refresh)
+    }
+  }
+
   // A read costs about 0.2s; poll fast while open, slow while closed.
   Timer {
     interval: root.opened ? 5000 : 45000
@@ -515,6 +606,9 @@ Panel {
         else if (t === "0") root.setLink(!root.connected)
         else if (t === "l" || t === "L") root.setLatency(!root.lowLatency)
         else if (t === "i" || t === "I") root.setInEar(!root.inEar)
+        else if ((t === "b" || t === "B") && root.hasEnhancedBass) root.setEnhancedBass(!root.enhancedBass)
+        else if ((t === "s" || t === "S") && root.hasSuperMic) root.setSpatial(!root.spatialFixed)
+        else if ((t === "m" || t === "M") && root.hasSuperMic) root.setSuperMic(!root.superMic)
       }
 
       Column {
@@ -827,31 +921,138 @@ Panel {
           fontFamily: root.fontFamily
         }
 
-        Toggle {
+        // Two-column tile grid: compact half-width switches. Descriptions are
+        // dropped here (they'd wrap at half width); the labels carry it, and a
+        // tooltip spells each one out. Invisible tiles take no cell, so on
+        // non-Ear (3) models the grid falls back to just the first two.
+        Grid {
+          id: playbackGrid
           visible: root.connected && root.setupComplete
           width: parent.width
-          label: "Low lag mode"
-          description: "Lower audio delay for games"
-          checked: root.lowLatency
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.setLatency(!root.lowLatency)
+          columns: 2
+          columnSpacing: Style.space(8)
+          rowSpacing: Style.space(8)
+
+          readonly property real cellWidth: (width - columnSpacing) / 2
+
+          ToggleTile {
+            width: playbackGrid.cellWidth
+            label: "Low lag"
+            tip: "Lower audio delay for games"
+            checked: root.lowLatency
+            onToggled: root.setLatency(!root.lowLatency)
+          }
+
+          ToggleTile {
+            width: playbackGrid.cellWidth
+            label: "In-ear"
+            tip: "Pause when a bud is removed"
+            checked: root.inEar
+            onToggled: root.setInEar(!root.inEar)
+          }
+
+          ToggleTile {
+            visible: root.hasEnhancedBass
+            width: playbackGrid.cellWidth
+            label: "Bass boost"
+            tip: "Boost low frequencies"
+            checked: root.enhancedBass
+            onToggled: root.setEnhancedBass(!root.enhancedBass)
+          }
+
+          ToggleTile {
+            visible: root.hasSuperMic
+            width: playbackGrid.cellWidth
+            label: "Spatial"
+            tip: "Fixed head-stage spatial audio"
+            checked: root.spatialFixed
+            onToggled: root.setSpatial(!root.spatialFixed)
+          }
+
+          ToggleTile {
+            visible: root.hasSuperMic
+            width: playbackGrid.cellWidth
+            label: "Super Mic"
+            tip: "Case Talk-button mic for calls"
+            checked: root.superMic
+            onToggled: root.setSuperMic(!root.superMic)
+          }
         }
 
-        Toggle {
-          visible: root.connected && root.setupComplete
+        // Bass strength, only while bass is on. Four levels, matching the app.
+        Row {
+          id: bassRow
+          visible: root.connected && root.setupComplete && root.enhancedBass
           width: parent.width
-          label: "In-ear detection"
-          description: "Pause when a bud is removed"
-          checked: root.inEar
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.setInEar(!root.inEar)
+          spacing: Style.space(6)
+
+          readonly property real cellWidth:
+            (width - spacing * (root.bassLevels.length - 1)) / root.bassLevels.length
+
+          Repeater {
+            model: root.bassLevels
+
+            delegate: Button {
+              required property var modelData
+
+              width: bassRow.cellWidth
+              text: String(modelData)
+              selected: root.bassLevel === modelData
+              bordered: true
+              foreground: root.foreground
+              accent: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.bodySmall
+              onClicked: root.setBassLevel(modelData)
+            }
+          }
         }
 
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
+
+        PanelSectionHeader {
+          visible: root.connected && root.setupComplete && root.codecs.length > 0
+          text: "Audio codec"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        // Chips for each codec the buds currently advertise (LDAC needs the
+        // Nothing X "High-quality audio" setting on and dual connection off).
+        Row {
+          id: codecRow
+          visible: root.connected && root.setupComplete && root.codecs.length > 0
+          width: parent.width
+          spacing: Style.space(6)
+
+          readonly property int count: root.codecs.length
+          readonly property real cellWidth:
+            count > 0 ? (width - spacing * (count - 1)) / count : width
+
+          Repeater {
+            model: root.codecs
+
+            delegate: Button {
+              required property var modelData
+
+              width: codecRow.cellWidth
+              text: String(modelData).toUpperCase()
+              selected: root.codec === modelData
+              bordered: true
+              foreground: root.foreground
+              accent: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.bodySmall
+              onClicked: root.setCodec(modelData)
+            }
+          }
+        }
+
+        PanelSeparator {
+          visible: root.connected && root.setupComplete && root.codecs.length > 0
+          width: parent.width
+          foreground: root.foreground
+        }
 
         Button {
           width: parent.width
@@ -877,6 +1078,70 @@ Panel {
           wrapMode: Text.WordWrap
         }
       }
+    }
+  }
+
+  // Compact half-width switch tile for the Playback grid. Fill and border are
+  // derived from the theme foreground (same approach as ModeButton), so it
+  // stays correct across themes. The row owns the click; the switch is
+  // presentation only.
+  component ToggleTile: Rectangle {
+    id: tile
+
+    property string label: ""
+    property string tip: ""
+    property bool checked: false
+    signal toggled()
+
+    readonly property bool hot: tileMouse.containsMouse
+
+    implicitHeight: Style.space(46)
+    radius: Style.cornerRadius
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.08 : 0.04)
+    border.width: 1
+    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.25 : 0.14)
+
+    Behavior on color { ColorAnimation { duration: 100 } }
+
+    Row {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(6)
+
+      Text {
+        width: parent.width - tileSwitch.width - parent.spacing
+        anchors.verticalCenter: parent.verticalCenter
+        text: tile.label
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      ToggleSwitch {
+        id: tileSwitch
+        anchors.verticalCenter: parent.verticalCenter
+        checked: tile.checked
+        interactive: false
+        foreground: root.foreground
+        accent: root.foreground
+      }
+    }
+
+    MouseArea {
+      id: tileMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tile.toggled()
+    }
+
+    PanelToolTip {
+      visible: tileMouse.containsMouse && tile.tip !== ""
+      text: tile.tip
+      fontFamily: root.fontFamily
     }
   }
 
