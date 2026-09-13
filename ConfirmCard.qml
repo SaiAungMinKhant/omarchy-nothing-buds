@@ -3,10 +3,11 @@ import qs.Commons
 import qs.Ui
 
 // A yes/no question over the panel card. Adapted from the Omarchy shell's
-// Ui/ConfirmDialog (MIT, see licenses/omarchy-LICENSE) with the buttons
-// centred: the earbuds panel is narrow and a right-anchored pair looks
-// pushed against the edge. The message stays left-aligned. Keyboard routing stays in the panel's key catcher
-// (Esc cancels, Tab or Left/Right switch, Enter acts on `selectedIndex`).
+// Ui/ConfirmDialog, MIT, see licenses/omarchy-LICENSE. The buttons are
+// centred because the earbuds panel is narrow and a right-anchored pair
+// looks pushed against the edge. The message stays left-aligned. Keyboard
+// routing stays in the panel's key catcher. Esc cancels, Tab or Left/Right
+// switch, Enter acts on `selectedIndex`.
 Item {
   id: root
 

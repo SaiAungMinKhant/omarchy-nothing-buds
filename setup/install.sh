@@ -11,7 +11,7 @@
 # Exit codes:
 #   0  done
 #   1  --check only: missing or out of date
-#   2  earctl missing, needs a terminal; nothing else changed
+#   2  earctl missing or built from an older pin, needs a terminal; nothing else changed
 #   3  bluetoothctl or jq missing
 #   4  consent not given
 #   5  pre-existing object refused (see --replace-existing)
@@ -51,7 +51,8 @@ usage() {
     "  $NB_WRAPPER        the earbuds helper command" \
     "  $NB_UNIT           systemd --user service (earctl RFCOMM server)" \
     "  $NB_CONF_DIR/            config: pinned earbuds address, RFCOMM channel" \
-    "  earctl                   Nothing RFCOMM tool, from pinned source (Git and Rust required)" \
+    "  earctl                   Nothing RFCOMM tool, from pinned source (Git and Rust required);" \
+    "                           rebuilt when this plugin built it from an older pin" \
     "" \
     "--yes                skip the confirmation prompt (used by the panel," \
     "                    where the click on \"Set up\" is the confirmation)" \

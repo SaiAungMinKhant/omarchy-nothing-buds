@@ -3,12 +3,10 @@
 ANC, battery and playback controls for Nothing and CMF earbuds, as an Omarchy
 bar widget.
 
-<p>
-  <img src="preview.png" alt="Panel on a dark theme" width="300">
-  <img src="preview-light.png" alt="Panel on a light theme" width="300">
-</p>
+<img src="preview.png" alt="The panel on a dark and a light Omarchy theme" width="720">
 
-The panel follows your Omarchy theme; both shots are the same build.
+The panel follows your Omarchy theme. Both shots are the same build, on CMF
+Buds 2.
 
 - A dot on the bar icon carries the mode. Filled for ANC, hollow for
   transparency, drained when off or disconnected.
@@ -50,8 +48,8 @@ omarchy plugin add https://github.com/SaiAungMinKhant/omarchy-nothing-buds.git -
 ```
 
 **Setup only ever runs from a click.** Enabling the plugin never modifies
-anything by itself: the panel opens with a short list of what setup installs
-and a "Set up now" button. The click is the consent; the panel then runs
+anything by itself. The panel opens with a short list of what setup installs
+and a "Set up now" button. The click is the consent. The panel then runs
 `setup/install.sh --yes`.
 
 What that click installs:
@@ -60,12 +58,13 @@ What that click installs:
 - `earctl.service`, a systemd **user** service that keeps the RFCOMM session
   open,
 - a pinned earbuds address in `~/.config/earbuds`,
-- earctl itself, if it is not already on the machine.
+- earctl itself, if it is not already on the machine, or a rebuild of one
+  this plugin built from an older pin.
 
 Nothing runs as root and installation never asks for a password. If earctl is
-missing, setup stops and the panel offers an "Install earctl" button that
-opens a terminal, where the installer prints its plan and asks
-`Proceed? [y/N]` before doing anything. Have Git, a Rust toolchain (Cargo),
+missing, or was built by this plugin from an older pin, setup stops and the
+panel offers an "Install earctl" button that opens a terminal, where the
+installer prints its plan and asks `Proceed? [y/N]` before doing anything. Have Git, a Rust toolchain (Cargo),
 and the native build dependencies for earctl available first.
 
 Missing earctl is always built from commit
@@ -77,26 +76,26 @@ committed lockfile. The binary goes into `~/.local/bin/earctl` and the commit
 is recorded next to the manifest. When a later version of this plugin moves
 the pin, setup sees the recorded commit no longer matches and rebuilds, in a
 terminal. Setup never installs an AUR package, even when `yay` is available.
-An existing earctl is reused as a user-provided dependency and never rebuilt;
-if it predates the pinned commit, the extra controls stay hidden until you
+An existing earctl is reused as a user-provided dependency and never rebuilt.
+If it predates the pinned commit, the extra controls stay hidden until you
 update it yourself.
 
-Every file is written atomically (temp file + rename, never through a
-symlink), recorded in a manifest at
+Every file is written by temp file and rename, never through a symlink,
+recorded in a manifest at
 `~/.local/state/io.github.saiaungminkhant.nothing-buds/`, and backed up before
-replacement. A pre-existing file that this plugin cannot prove it owns
-(manifest record, or byte-identical to a version this plugin ships or has
-shipped) is refused with exit 5 rather than overwritten; `--replace-existing`
-overrides that for a human who wants it, keeping the old copy in the
-`backup/` directory.
+replacement. A pre-existing file counts as ours only when the manifest
+records it or it is byte-identical to a version this plugin ships or has
+shipped. Anything else is refused with exit 5 rather than overwritten.
+`--replace-existing` overrides that for a human who wants it, keeping the old
+copy in the `backup/` directory.
 
 The panel decides whether to offer setup by running `install.sh --check`,
 which exits 0 only when the wrapper is present and byte-identical to the one
-in the plugin folder, the unit exists, and earctl is found. It changes
-nothing and asks nothing.
+in the plugin folder, the unit exists, earctl is found, and an earctl this
+plugin built matches the pinned commit. It changes nothing and asks nothing.
 
 Installer exit codes: `0` done · `1` (`--check` only) missing or out of date ·
-`2` earctl missing, needs a terminal · `3` base dependency missing · `4`
+`2` earctl missing or built from an older pin, needs a terminal · `3` base dependency missing · `4`
 consent not given · `5` pre-existing object refused · `6` operational failure
 (everything rolled back).
 
@@ -110,7 +109,7 @@ Run by hand it prints its plan and asks before proceeding, and installs earctl
 too, since it has a terminal to work with. A failed run rolls back everything
 it did, restoring backups.
 
-**Upgrading from before the manifest existed** (version 0.0.1): the panel
+**Upgrading from version 0.0.1**, before the manifest existed, the panel
 shows "Set up now" again, because the installed wrapper is out of date. The
 installer recognises the old wrapper and unit by hash (`NB_SHIPPED_SHAS` in
 `setup/lib.sh`), so the click replaces them with backups and records a
@@ -127,13 +126,14 @@ omarchy plugin remove io.github.saiaungminkhant.nothing-buds
 Run them in that order. `omarchy plugin remove` deletes the plugin folder and
 nothing else, and the uninstall script lives inside it.
 
-The uninstall is manifest-driven: it removes exactly the objects recorded at
-install time, and only while they are still provably ours — same recorded
-hash, not currently a symlink. Files you edited are left alone, directories
+The uninstall is manifest-driven. It removes exactly the objects recorded at
+install time, and only while they are still provably ours, meaning the same
+recorded hash and not currently a symlink. Files you edited are left alone, directories
 are removed only when empty, and an earctl this plugin never installed is
 never touched. The manifest itself and the backups go too.
 
-The built earctl binary is removed by exact recorded path and hash. For
+The built earctl binary is removed by exact recorded path and hash, along
+with the record of the commit it was built from. For
 compatibility with version 0.0.2, an earctl package recorded by that version
 is still removed through the package manager (`yay -Rns`, which may ask for
 a password). New installations never create package records. Pass
@@ -166,8 +166,9 @@ To pin per-widget instead, add keys to this widget's entry in
 The panel validates these too and shows "Ignoring invalid address/channel in
 shell.json" if one fails the grammar, instead of building a command with them.
 The `EARBUDS_ADDR`, `EARBUDS_CHANNEL` and `EARCTL` environment variables from
-the first release are gone: an environment variable is an executable/input
-steering mechanism this plugin no longer has.
+the first release are gone. An environment variable can steer which
+executable runs or what it reads, and this plugin no longer has any such
+path.
 
 ### RFCOMM channel
 
@@ -219,14 +220,14 @@ The marketplace review requirements are addressed here:
 
 | Requirement | Mechanism |
 |---|---|
-| Dependency installation must use the reviewed source | Missing earctl is built only from the full commit above, with detached checkout and HEAD verification before Cargo runs. `--locked` requires the committed dependency lockfile. There is no AUR installation path. S5, S5c |
+| Dependency installation must use the reviewed source | Missing earctl is built only from the full commit above, with detached checkout and HEAD verification before Cargo runs. `--locked` requires the committed dependency lockfile. The built commit is recorded, so a moved pin rebuilds rather than keeping an older binary. There is no AUR installation path. S5, S5a, S5c |
 | Setup must be an explicit, consented action; no overwriting objects the plugin cannot prove it owns | Setup runs only from the panel's "Set up" click (`--yes`) or a y/N prompt in a terminal. `setup/lib.sh` installs through `nb_install_file`: symlinked targets are refused, pre-existing files are refused unless recorded in the manifest or byte-identical to a version shipped here, replaced files are backed up, and everything is published by atomic rename. The panel only ever probes with `install.sh --check`, which is read-only. `bash setup/test.sh` S1, S6, S7, S9, S15, S16 |
 | Uninstall must remove only what this installation created | A manifest at `~/.local/state/io.github.saiaungminkhant.nothing-buds/` records every file, directory and package created. Removal is hash-checked, symlink-checked, empty-dir-only, and never recurses by inference. Legacy installs get content-matching only. S3, S8, S11, S12 |
 | Helper calls need deadlines and output caps; a hung or noisy helper must not wedge the panel | Every wrapper call is wrapped in `/usr/bin/timeout` with byte caps on consumed output, and each helper runs in its own process group so a forked grandchild dies with it; the panel wraps every operation in `/usr/bin/timeout --kill-after=5 <deadline>`, streams stdout/stderr through capped parsers, and a watchdog plus supersession rules guarantee `busy`/link state always clears. Channel discovery is a fixed list of bounded probes, writes only inside the plugin's own state directory by temp file and rename, and refuses a symlink there. S13, S17 |
 | Executable identity and input boundaries must not be steerable | All binaries are invoked by absolute path; the `EARCTL`/`EARBUDS_ADDR`/`EARBUDS_CHANNEL` overrides are removed; the panel passes overrides as validated arguments; config files are read bounded, without following symlinks, and validated against a Bluetooth-address grammar before use. S14 |
 
-`setup/test.sh` runs all of this against fakes in a throwaway HOME — no root,
-no network, no real systemd — and is the evidence for the table above.
+`setup/test.sh` runs all of this against fakes in a throwaway HOME, with no
+root, no network and no real systemd, and is the evidence for the table above.
 
 ## Notes
 
@@ -244,6 +245,8 @@ MIT. See [LICENSE](LICENSE).
 
 The bundled [Phosphor Icons](https://phosphoricons.com) path data is also MIT.
 Its notice is in [licenses/phosphor-LICENSE](licenses/phosphor-LICENSE).
+`ConfirmCard.qml` is adapted from the Omarchy shell's ConfirmDialog, MIT,
+with its notice in [licenses/omarchy-LICENSE](licenses/omarchy-LICENSE).
 
 Not affiliated with, endorsed by, or connected to Nothing Technology Limited.
 "Nothing", "CMF" and the product names are their trademarks, used here only to
