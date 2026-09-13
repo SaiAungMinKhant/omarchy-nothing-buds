@@ -8,9 +8,10 @@
 # lookup or environment variable selects an executable.
 #
 # earctl quirks handled here: channel discovery needs sdptool (not on Arch),
-# so the channel defaults to 16; the RFCOMM session dies on disconnect, so
-# every command re-establishes it; only ONE socket client is allowed, so
-# BudsLink or ear-web will fight this; `ring` wants an interactive y/N.
+# so the channel defaults to 16 and `discover-channel` probes for one that
+# answers; the RFCOMM session dies on disconnect, so every command
+# re-establishes it; only ONE socket client is allowed, so BudsLink or
+# ear-web will fight this; `ring` wants an interactive y/N.
 #
 # Every external call has a deadline (/usr/bin/timeout) and a byte cap. The
 # inner timeouts do not use --foreground, so each helper gets its own process
@@ -29,11 +30,21 @@ NB_AWK=/usr/bin/awk
 NB_SED=/usr/bin/sed
 NB_TR=/usr/bin/tr
 NB_SLEEP=/usr/bin/sleep
+NB_MKTEMP=/usr/bin/mktemp
+NB_MV=/usr/bin/mv
+NB_RM=/usr/bin/rm
 NB_EARCTL_FALLBACK=/usr/bin/earctl
 NB_EARCTL_LOCAL=$HOME/.local/bin/earctl
 NB_STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/io.github.saiaungminkhant.nothing-buds
 NB_EARCTL_BIN_FILE=$NB_STATE_DIR/earctl-bin
+# Channel found by `discover-channel`; plugin-owned, so uninstall removes it.
+NB_FOUND_CHANNEL_FILE=$NB_STATE_DIR/channel
 NB_CONF_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/earbuds
+
+# Known channels first, then the range the README probes by hand.
+# 16: CMF Buds 2 (B179). 15: Nothing Ear (3) (B173).
+NB_KNOWN_CHANNELS=(16 15)
+NB_PROBE_MAX=30
 
 # ------------------------------------------------------------- validators
 
@@ -75,11 +86,14 @@ usage() {
     "  cycle                    off -> transparency -> ANC high -> off" \
     "  ring [left|right]        find my buds (the panel bounds the tone)" \
     "  unring                   stop the tone" \
+    "  discover-channel         probe RFCOMM channels ${NB_KNOWN_CHANNELS[*]} then 1-$NB_PROBE_MAX for one" \
+    "                           that answers; remembers it in $NB_FOUND_CHANNEL_FILE" \
     "  anything else            passed straight to earctl" \
     "" \
     "address resolution: --address, then $NB_CONF_DIR/address, then the" \
     "first paired device that looks like a Nothing or CMF product." \
-    "channel resolution: --channel, then $NB_CONF_DIR/channel, else 16."
+    "channel resolution: --channel, then $NB_CONF_DIR/channel, then the" \
+    "discovered one in $NB_FOUND_CHANNEL_FILE, else 16."
 }
 
 # -------------------------------------------------------------------- args
@@ -137,24 +151,39 @@ else
   fi
 fi
 
+# Read a channel file into $2; empty when absent or invalid (with a note).
+read_channel_file() {
+  local file=$1 var=$2 value=""
+  if nb_read_bounded "$file" 8 value; then
+    value=${value%$'\r'}
+  else
+    value=""
+  fi
+  if [[ -n $value ]] && ! nb_valid_channel "$value"; then
+    printf 'nothing-buds: invalid channel in %s; ignoring it\n' "$file" >&2
+    value=""
+  fi
+  printf -v "$var" '%s' "$value"
+}
+
+# CHANNEL_SOURCE tells discover-channel whether a human pinned the channel.
 CHANNEL=""
+CHANNEL_SOURCE=default
 if [[ -n ${channel_arg:-} ]]; then
   CHANNEL=$channel_arg
+  CHANNEL_SOURCE=arg
 else
-  if nb_read_bounded "$NB_CONF_DIR/channel" 8 CHANNEL; then
-    CHANNEL=${CHANNEL%$'\r'}
+  read_channel_file "$NB_CONF_DIR/channel" CHANNEL
+  if [[ -n $CHANNEL ]]; then
+    CHANNEL_SOURCE=config
   else
-    CHANNEL=""
-  fi
-  if nb_valid_channel "$CHANNEL"; then
-    :
-  else
-    [[ -z $CHANNEL ]] || printf 'nothing-buds: invalid channel in %s/channel; ignoring it\n' "$NB_CONF_DIR" >&2
-    CHANNEL=""
+    read_channel_file "$NB_FOUND_CHANNEL_FILE" CHANNEL
+    [[ -z $CHANNEL ]] || CHANNEL_SOURCE=discovered
   fi
 fi
-[[ -n $CHANNEL ]] || CHANNEL=16
-# Right for CMF Buds 2; 12, 13, 17 and 29 accept but never answer. Other models differ (see README).
+[[ -n $CHANNEL ]] || CHANNEL=${NB_KNOWN_CHANNELS[0]}
+# 16 is right for CMF Buds 2; 12, 13, 17 and 29 accept but never answer.
+# Other models differ (see README); discover-channel finds theirs.
 
 [[ -n $ADDR ]] || { echo '{"connected":false,"paired":false,"error":"no earbuds found"}'; exit 0; }
 
@@ -327,6 +356,66 @@ cmd_cycle() {
   cmd_status
 }
 
+# ------------------------------------------------------------- discovery
+
+# Remember a discovered channel: temp file + rename inside the state dir,
+# never through a symlink. The state dir is ours, so uninstall removes it.
+save_found_channel() {
+  local ch=$1 tmp
+  [[ -d $NB_STATE_DIR && ! -L $NB_STATE_DIR ]] || return 1
+  [[ ! -L $NB_FOUND_CHANNEL_FILE ]] || return 1
+  [[ ! -e $NB_FOUND_CHANNEL_FILE || -f $NB_FOUND_CHANNEL_FILE ]] || return 1
+  tmp=$($NB_MKTEMP "$NB_STATE_DIR/.channel.new.XXXXXX") || return 1
+  printf '%s\n' "$ch" >"$tmp" 2>/dev/null || { $NB_RM -f -- "$tmp"; return 1; }
+  $NB_MV -f -- "$tmp" "$NB_FOUND_CHANNEL_FILE" 2>/dev/null || { $NB_RM -f -- "$tmp"; return 1; }
+}
+
+discover_json() { # discovered channel saved reason
+  $NB_JQ -cn --argjson d "$1" --argjson c "$2" --argjson s "$3" --arg r "$4" \
+    '{discovered:$d, channel:$c, saved:$s, reason:$r}'
+}
+
+# Try the known channels, then 1..NB_PROBE_MAX, until one returns a battery
+# reading. Accepting the link is not enough: several channels open and stay
+# silent. Progress goes to stderr, one JSON line to stdout. Bounded: at most
+# 21s a probe, and most refused channels fail in well under a second.
+cmd_discover() {
+  if [[ $CHANNEL_SOURCE == arg || $CHANNEL_SOURCE == config ]]; then
+    discover_json false "$CHANNEL" false pinned
+    return 0
+  fi
+  [[ -n $EARCTL ]] || { discover_json false null false "earctl missing"; return 0; }
+  bt_connected || { discover_json false null false "link down"; return 0; }
+
+  local -a candidates=("${NB_KNOWN_CHANNELS[@]}")
+  local ch c seen
+  for (( ch = 1; ch <= NB_PROBE_MAX; ch++ )); do
+    seen=0
+    for c in "${candidates[@]}"; do [[ $c -ne $ch ]] || { seen=1; break; }; done
+    (( seen )) || candidates+=("$ch")
+  done
+
+  local i=0 total=${#candidates[@]}
+  for ch in "${candidates[@]}"; do
+    i=$((i + 1))
+    printf 'probing channel %s (%s of %s)\n' "$ch" "$i" "$total" >&2
+    # Tearing down a live session, then reconnecting at once, fails with
+    # EBUSY on real buds (as in ensure_session); give the socket a moment.
+    $NB_TIMEOUT --kill-after=2 5 "$EARCTL" disconnect >/dev/null 2>&1 && $NB_SLEEP 0.5
+    $NB_TIMEOUT --kill-after=2 8 "$EARCTL" auto-connect --bluetooth-address "$ADDR" --channel "$ch" >/dev/null 2>&1 || continue
+    $NB_TIMEOUT --kill-after=2 8 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192 | $NB_JQ -e 'type == "object"' >/dev/null 2>&1 || continue
+    if save_found_channel "$ch"; then
+      discover_json true "$ch" true ""
+    else
+      discover_json true "$ch" false "could not write $NB_FOUND_CHANNEL_FILE"
+    fi
+    return 0
+  done
+  $NB_TIMEOUT --kill-after=2 5 "$EARCTL" disconnect >/dev/null 2>&1
+  discover_json false null false "no channel answered"
+  return 0
+}
+
 # ---------------------------------------------------------------- dispatch
 
 case ${1:-status} in
@@ -337,6 +426,7 @@ case ${1:-status} in
   connect)   cmd_connect ;;
   disconnect) cmd_disconnect ;;
   set)       shift; cmd_set "$@" ;;
+  discover-channel) cmd_discover ;;
   *)
     if [[ -n $EARCTL ]]; then
       exec "$EARCTL" "$@"

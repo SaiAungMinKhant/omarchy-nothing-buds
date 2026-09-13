@@ -180,6 +180,21 @@ if [[ $1 == anc && $2 == get && -f "__FAKE__/anc-fail-first" && ! -f "__FAKE__/a
   touch "__FAKE__/anc-failed"
   exit 1
 fi
+# Channel gate: with works-on-channel present, reads answer only after an
+# auto-connect on that channel. Other channels accept and stay silent, like
+# real buds on the wrong RFCOMM channel.
+case $1 in
+  auto-connect)
+    while (( $# > 1 )); do
+      [[ $1 == --channel ]] && echo "$2" >"__FAKE__/last-channel"
+      shift
+    done ;;
+  disconnect) /usr/bin/rm -f -- "__FAKE__/last-channel" ;;
+esac
+if [[ -f "__FAKE__/works-on-channel" ]] && [[ $1 == battery || ( $1 == anc && $2 == get ) ]]; then
+  [[ -f "__FAKE__/last-channel" ]] || exit 1
+  [[ $(/usr/bin/cat "__FAKE__/last-channel") == "$(/usr/bin/cat "__FAKE__/works-on-channel")" ]] || exit 1
+fi
 case $1 in
   anc)    if [[ $2 == get ]]; then echo '"noise_cancellation_high"'; fi ;;
   battery) echo '{"left":{"Level":{"percent":80,"charging":false}},"right":{"Level":{"percent":75,"charging":false}},"case":{"Level":{"percent":60,"charging":false}}}' ;;
@@ -767,6 +782,89 @@ printf '#!/bin/bash\necho not ours\n' >"$H/.local/bin/earbuds"
 run_install --yes
 assert_rc "unknown wrapper bytes still refused" 5 "$?"
 assert_eq "foreign wrapper untouched" "$(/usr/bin/tail -n1 "$H/.local/bin/earbuds")" "echo not ours"
+
+step "S17: a silent channel is discovered, remembered, and cleaned up"
+new_home
+log_reset
+make_earctl
+run_install --yes
+assert_rc "install for discovery" 0 "$?"
+STATE_CH=$H/.local/state/io.github.saiaungminkhant.nothing-buds/channel
+echo 15 >"$FAKE/works-on-channel"
+echo yes >"$FAKE/bt-connected"
+
+# The default channel opens but never answers: status is honest about it.
+log_reset
+out=$(wrap status)
+assert_rc "status on the wrong channel" 0 "$?"
+assert_eq "wrong channel reads as not connected" "$(echo "$out" | /usr/bin/jq -r .connected)" "false"
+assert_line "default channel was tried" "--channel 16" "$FAKE/log"
+assert_no_line "status itself never probes other channels" "--channel 15" "$FAKE/log"
+
+# Discovery: known channels first, proof is a battery reading, result saved.
+log_reset
+out=$(wrap discover-channel 2>"$T/progress")
+assert_rc "discover-channel" 0 "$?"
+assert_eq "discovered" "$(echo "$out" | /usr/bin/jq -r .discovered)" "true"
+assert_eq "found channel 15" "$(echo "$out" | /usr/bin/jq -r .channel)" "15"
+assert_eq "saved" "$(echo "$out" | /usr/bin/jq -r .saved)" "true"
+assert_eq "state file holds the channel" "$(/usr/bin/cat "$STATE_CH")" "15"
+assert_eq "known channels first: 16 then 15, nothing else" \
+  "$(/usr/bin/grep -o -- '--channel [0-9]*' "$FAKE/log" | /usr/bin/tr '\n' ' ')" "--channel 16 --channel 15 "
+assert_line "battery reading was the proof" "earctl battery" "$FAKE/log"
+assert_line "progress reported on stderr" "probing channel 15 (2 of 30)" "$T/progress"
+
+# The wrapper now resolves the discovered channel on its own.
+/usr/bin/rm -f -- "$FAKE/last-channel"
+log_reset
+out=$(wrap status)
+assert_eq "status connects on the discovered channel" "$(echo "$out" | /usr/bin/jq -r .connected)" "true"
+assert_line "discovered channel used" "--channel 15" "$FAKE/log"
+assert_no_line "default no longer tried" "--channel 16" "$FAKE/log"
+
+# A hand-pinned channel wins over the discovered one and blocks probing.
+echo 12 >"$H/.config/earbuds/channel"
+log_reset
+out=$(wrap discover-channel 2>/dev/null)
+assert_eq "pinned channel is not probed over" "$(echo "$out" | /usr/bin/jq -r .discovered)" "false"
+assert_eq "pinned reason" "$(echo "$out" | /usr/bin/jq -r .reason)" "pinned"
+assert_eq "pinned channel reported" "$(echo "$out" | /usr/bin/jq -r .channel)" "12"
+assert_no_line "no probe while pinned" "auto-connect" "$FAKE/log"
+/usr/bin/rm -f -- "$H/.config/earbuds/channel"
+
+# A symlink at the state path is never written through.
+/usr/bin/rm -f -- "$STATE_CH"
+echo "keep" >"$T/ch-victim"
+/usr/bin/ln -s -- "$T/ch-victim" "$STATE_CH"
+out=$(wrap discover-channel 2>/dev/null)
+assert_eq "symlink: channel still found" "$(echo "$out" | /usr/bin/jq -r .discovered)" "true"
+assert_eq "symlink: not saved" "$(echo "$out" | /usr/bin/jq -r .saved)" "false"
+assert_eq "symlink target untouched" "$(/usr/bin/cat "$T/ch-victim")" "keep"
+/usr/bin/rm -f -- "$STATE_CH"
+
+# Nothing answers: the whole range is covered, once, and it stops.
+echo 99 >"$FAKE/works-on-channel"
+log_reset
+t0=$SECONDS
+out=$(wrap discover-channel 2>/dev/null)
+cost=$((SECONDS - t0))
+assert_eq "no answer reported" "$(echo "$out" | /usr/bin/jq -r .discovered)" "false"
+assert_eq "no answer reason" "$(echo "$out" | /usr/bin/jq -r .reason)" "no channel answered"
+assert_eq "exactly 30 channels probed" "$(/usr/bin/grep -c -- 'auto-connect' "$FAKE/log")" "30"
+assert_line "range reaches 30" "--channel 30" "$FAKE/log"
+assert_gone "nothing saved on failure" "$STATE_CH"
+if (( cost <= 60 )); then ok "full probe bounded (${cost}s)"; else bad "full probe took ${cost}s"; fi
+
+# Uninstall removes the discovered channel along with the state dir.
+echo 15 >"$FAKE/works-on-channel"
+wrap discover-channel >/dev/null 2>&1
+assert_exists "discovered channel before uninstall" "$STATE_CH"
+log_reset
+run_uninstall --yes
+assert_rc "uninstall after discovery" 0 "$?"
+assert_gone "discovered channel removed" "$STATE_CH"
+assert_gone "state dir removed" "$H/.local/state/io.github.saiaungminkhant.nothing-buds"
+/usr/bin/rm -f -- "$FAKE/works-on-channel" "$FAKE/last-channel" "$FAKE/bt-connected"
 
 # ------------------------------------------------------------------ verdict
 

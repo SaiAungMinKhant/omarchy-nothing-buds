@@ -176,6 +176,59 @@ Panel {
   // Connect finished with the link still down: usually the buds are in their case.
   property bool linkFailed: false
 
+  // ------------------------------------------------------ channel discovery
+  // A link that is up but never answers usually means the wrong RFCOMM
+  // channel (CMF Buds 2: 16, Nothing Ear (3): 15). After two silent status
+  // reads in a row the wrapper probes for one that answers, once per link,
+  // unless shell.json pins a channel. The probe holds the only RFCOMM
+  // session, so status polling pauses while it runs.
+  property int silentReads: 0
+  property bool discovering: false
+  property bool discoveredThisLink: false
+  property string discoverNote: ""
+
+  readonly property string silentText:
+    discoverNote !== "" ? discoverNote
+    : "Connected over Bluetooth. Waiting for the earbuds to answer."
+
+  function noteSilentRead() {
+    if (!root.linkUp) return
+    root.silentReads += 1
+    if (root.silentReads < 2 || root.discovering || root.discoveredThisLink || root.channelValid) return
+    root.discoveredThisLink = true
+    root.discovering = true
+    root.discoverNote = "Looking for the channel your earbuds answer on."
+    discoverProc.start(root.cmd(["discover-channel"]))
+  }
+
+  function discoverDone(code, out, ok) {
+    root.discovering = false
+    var r = null
+    try { r = JSON.parse(String(out || "").trim()) } catch (e) { r = null }
+    if (!ok || !r) {
+      root.discoverNote = code === 124
+        ? "The channel search timed out. See the RFCOMM section in the README."
+        : "The channel search failed. See the RFCOMM section in the README."
+      return
+    }
+    if (r.discovered === true) {
+      root.discoverNote = r.saved === true
+        ? "Found your earbuds on channel " + r.channel + "."
+        : "Your earbuds answer on channel " + r.channel + ", but it could not be saved. "
+          + "Pin it in ~/.config/earbuds/channel."
+      root.silentReads = 0
+      Qt.callLater(root.refresh)
+    } else if (r.reason === "pinned") {
+      root.discoverNote = "Channel " + r.channel + " is pinned in ~/.config/earbuds/channel "
+        + "but the earbuds never answer on it. Change or remove that file."
+    } else if (r.reason === "link down") {
+      root.discoverNote = ""
+    } else {
+      root.discoverNote = "No channel from 1 to 30 answered. "
+        + "See the RFCOMM section in the README."
+    }
+  }
+
   readonly property bool lowLatency: connected && state.low_latency === true
   readonly property bool inEar: connected && state.in_ear === true
 
@@ -208,7 +261,7 @@ Panel {
   }
 
   function refresh() {
-    if (root.busy || !root.setupComplete) return
+    if (root.busy || root.discovering || !root.setupComplete) return
     root.busy = true
     statusProc.start(root.cmd(["status"]))
   }
@@ -258,7 +311,7 @@ Panel {
 
   function stopAll() {
     var ps = [probeProc, earctlProc, bootstrapProc, statusProc, setProc,
-              ringProc, unringProc, linkProc, latencyProc, inEarProc]
+              ringProc, unringProc, linkProc, latencyProc, inEarProc, discoverProc]
     for (var i = 0; i < ps.length; i++) ps[i].stop()
   }
 
@@ -266,7 +319,17 @@ Panel {
   Component.onDestruction: root.stopAll()
 
   // BlueZ said so; ask the wrapper for details now rather than next poll.
-  onLinkUpChanged: Qt.callLater(root.refresh)
+  // A new link gets a fresh chance at discovery; a lost one ends a running probe.
+  onLinkUpChanged: {
+    root.silentReads = 0
+    root.discoveredThisLink = false
+    root.discoverNote = ""
+    if (!root.linkUp && root.discovering) {
+      discoverProc.stop()
+      root.discovering = false
+    }
+    Qt.callLater(root.refresh)
+  }
 
   // ------------------------------------------------------------------ setup
   // processes
@@ -280,6 +343,8 @@ Panel {
     property int cap: 8192
     // Called exactly once per start: (exitCode, stdout, stderr, ok)
     property var onDone: null
+    // Called per stderr line while live, for helpers that report progress.
+    property var onProgress: null
 
     property string outBuf: ""
     property string errBuf: ""
@@ -322,6 +387,7 @@ Panel {
       if (!bp.live) return
       if (isErr) {
         if (bp.errBuf.length < 4096) bp.errBuf += line + "\n"
+        if (bp.onProgress) bp.onProgress(line.length > 180 ? line.substring(0, 180) : line)
         return
       }
       if (bp.outBuf.length + line.length > bp.cap) {
@@ -414,10 +480,26 @@ Panel {
     deadline: "40"
     onDone: function(code, out, err, ok) {
       root.busy = false
-      if (ok) root.apply(out)
+      if (ok) {
+        root.apply(out)
+        if (root.state && root.state.connected === true) root.silentReads = 0
+        else root.noteSilentRead()
+      }
       else if (code === 124) root.lastError = "The earbuds command timed out."
       else root.lastError = "Could not read earbud state."
     }
+  }
+
+  // Probes up to 30 channels at up to 21s each; known models answer in seconds.
+  BoundedProcess {
+    id: discoverProc
+    deadline: "660"
+    onProgress: function(line) {
+      var m = /^probing channel (\d+) \((\d+) of (\d+)\)/.exec(line)
+      if (m) root.discoverNote = "Looking for the channel your earbuds answer on. "
+        + "Trying " + m[1] + " (" + m[2] + " of " + m[3] + ")."
+    }
+    onDone: function(code, out, err, ok) { root.discoverDone(code, out, ok) }
   }
 
   // Re-read so the panel shows the level the buds actually took.
@@ -711,7 +793,7 @@ Panel {
             width: parent.width
             // Say Bluetooth explicitly; everything below needs the link.
             text: root.linkUp
-                ? "Connected over Bluetooth. Waiting for the earbuds to answer."
+                ? root.silentText
                 : (root.linkFailed
                     ? "The earbuds did not answer. Take them out of the case, "
                       + "then try the switch again."
