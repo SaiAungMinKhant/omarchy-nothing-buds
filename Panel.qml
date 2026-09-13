@@ -347,6 +347,7 @@ Panel {
   // Set-only: reflect the intent locally, since status carries no spatial
   // field. Enabling spatial clears bass on the device (mutual exclusivity).
   function setSpatial(fixed) {
+    if (!root.claim(spatialProc)) return
     root.spatialFixed = fixed
     spatialProc.start(root.cmd(["set", "spatial", fixed ? "fixed" : "off"]))
   }
@@ -614,7 +615,11 @@ Panel {
   BoundedProcess {
     id: spatialProc
     deadline: "20"
-    onDone: function(code, out, err, ok) { Qt.callLater(root.refresh) }
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
+      else Qt.callLater(root.refresh)
+    }
   }
 
   // The wrapper waits for the sink to come back before it echoes status,
@@ -648,7 +653,7 @@ Panel {
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(320))
     // 520 clipped the action buttons.
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(900))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -1009,90 +1014,114 @@ Panel {
           fontFamily: root.fontFamily
         }
 
-        // Two-column tile grid: compact half-width switches. Descriptions are
-        // dropped here (they'd wrap at half width); the labels carry it, and a
-        // tooltip spells each one out. Invisible tiles take no cell, so on
-        // non-Ear (3) models the grid falls back to just the first two.
-        Grid {
-          id: playbackGrid
+        Toggle {
           visible: root.connected && root.setupComplete
           width: parent.width
-          columns: 2
-          columnSpacing: Style.space(8)
-          rowSpacing: Style.space(8)
+          label: "Low lag mode"
+          description: "Lower audio delay for games"
+          checked: root.shownLatency
+          foreground: root.foreground
+          accent: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.setLatency(!root.shownLatency)
+        }
 
-          readonly property real cellWidth: (width - columnSpacing) / 2
+        Toggle {
+          visible: root.connected && root.setupComplete
+          width: parent.width
+          label: "In-ear detection"
+          description: "Pause when a bud is removed"
+          checked: root.shownInEar
+          foreground: root.foreground
+          accent: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.setInEar(!root.shownInEar)
+        }
 
-          ToggleTile {
-            width: playbackGrid.cellWidth
-            label: "Low lag"
-            tip: "Lower audio delay for games"
-            checked: root.shownLatency
-            onToggled: root.setLatency(!root.shownLatency)
+        Toggle {
+          visible: root.connected && root.setupComplete && root.hasSuperMic
+          width: parent.width
+          label: "Super Mic"
+          description: "Case Talk-button mic for calls"
+          checked: root.superMic
+          foreground: root.foreground
+          accent: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.setSuperMic(!root.superMic)
+        }
+
+        // Laid out as in Nothing X: two round choices, Fixed and Off.
+        PanelSeparator { visible: root.connected && root.hasSpatial; width: parent.width; foreground: root.foreground }
+
+        PanelSectionHeader {
+          visible: root.connected && root.setupComplete && root.hasSpatial
+          text: "Spatial audio"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Row {
+          visible: root.connected && root.setupComplete && root.hasSpatial
+          width: parent.width
+          readonly property real cellWidth: (width - spacing) / 2
+          spacing: Style.space(8)
+
+          ChoiceButton {
+            width: parent.cellWidth
+            label: "Fixed"
+            iconName: "circle-dashed"
+            selected: root.spatialFixed
+            onChosen: root.setSpatial(true)
           }
 
-          ToggleTile {
-            width: playbackGrid.cellWidth
-            label: "In-ear"
-            tip: "Pause when a bud is removed"
-            checked: root.shownInEar
-            onToggled: root.setInEar(!root.shownInEar)
-          }
-
-          ToggleTile {
-            visible: root.hasEnhancedBass
-            width: playbackGrid.cellWidth
-            label: "Bass boost"
-            tip: "Boost low frequencies"
-            checked: root.enhancedBass
-            onToggled: root.setEnhancedBass(!root.enhancedBass)
-          }
-
-          ToggleTile {
-            visible: root.hasSpatial
-            width: playbackGrid.cellWidth
-            label: "Spatial"
-            tip: "Fixed head-stage spatial audio"
-            checked: root.spatialFixed
-            onToggled: root.setSpatial(!root.spatialFixed)
-          }
-
-          ToggleTile {
-            visible: root.hasSuperMic
-            width: playbackGrid.cellWidth
-            label: "Super Mic"
-            tip: "Case Talk-button mic for calls"
-            checked: root.superMic
-            onToggled: root.setSuperMic(!root.superMic)
+          ChoiceButton {
+            width: parent.cellWidth
+            label: "Off"
+            iconName: "prohibit"
+            selected: !root.spatialFixed
+            onChosen: root.setSpatial(false)
           }
         }
 
-        // Bass strength, only while bass is on. Five levels, matching the app.
-        Row {
-          id: bassRow
-          visible: root.connected && root.setupComplete && root.enhancedBass
+        // Ultra bass as in Nothing X: a switch, and a five-step slider while on.
+        PanelSeparator { visible: root.connected && root.hasEnhancedBass; width: parent.width; foreground: root.foreground }
+
+        PanelSectionHeader {
+          visible: root.connected && root.setupComplete && root.hasEnhancedBass
+          text: "Ultra bass"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Toggle {
+          visible: root.connected && root.setupComplete && root.hasEnhancedBass
           width: parent.width
-          spacing: Style.space(6)
+          label: "Ultra bass"
+          description: root.enhancedBass ? "Level " + root.bassLevel : "Off"
+          checked: root.enhancedBass
+          foreground: root.foreground
+          accent: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.setEnhancedBass(!root.enhancedBass)
+        }
 
-          readonly property real cellWidth:
-            (width - spacing * (root.bassLevels.length - 1)) / root.bassLevels.length
+        Item {
+          visible: root.connected && root.setupComplete && root.hasEnhancedBass && root.enhancedBass
+          width: parent.width
+          height: Style.space(34)
 
-          Repeater {
-            model: root.bassLevels
-
-            delegate: Button {
-              required property var modelData
-
-              width: bassRow.cellWidth
-              text: String(modelData)
-              selected: root.bassLevel === modelData
-              bordered: true
-              foreground: root.foreground
-              accent: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              onClicked: root.setBassLevel(modelData)
-            }
+          PanelSlider {
+            bar: root.bar
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            minimum: 1
+            maximum: 5
+            step: 1
+            integer: true
+            tickCount: 5
+            value: root.bassLevel
+            onReleased: function(v) { root.setBassLevel(Math.round(v)) }
           }
         }
 
@@ -1181,67 +1210,57 @@ Panel {
     }
   }
 
-  // Compact half-width switch tile for the Playback grid. Fill and border are
-  // derived from the theme foreground (same approach as ModeButton), so it
-  // stays correct across themes. The row owns the click; the switch is
-  // presentation only.
-  component ToggleTile: Rectangle {
-    id: tile
+  // Round choice with a caption, the ANC row look, for any two-way setting.
+  component ChoiceButton: Item {
+    id: choice
 
     property string label: ""
-    property string tip: ""
-    property bool checked: false
-    signal toggled()
+    property string iconName: ""
+    property bool selected: false
+    signal chosen()
 
-    readonly property bool hot: tileMouse.containsMouse
+    readonly property real diameter: Style.space(44)
+    implicitHeight: choiceColumn.implicitHeight
 
-    implicitHeight: Style.space(46)
-    radius: Style.cornerRadius
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.08 : 0.04)
-    border.width: 1
-    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.25 : 0.14)
-
-    Behavior on color { ColorAnimation { duration: 100 } }
-
-    Row {
-      anchors.fill: parent
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
+    Column {
+      id: choiceColumn
+      width: parent.width
       spacing: Style.space(6)
 
-      Text {
-        width: parent.width - tileSwitch.width - parent.spacing
-        anchors.verticalCenter: parent.verticalCenter
-        text: tile.label
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-        elide: Text.ElideRight
+      Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: choice.diameter
+        height: choice.diameter
+        radius: width / 2
+        color: choice.selected
+          ? root.foreground
+          : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+
+        Behavior on color { ColorAnimation { duration: 180 } }
+
+        PhosphorIcon {
+          anchors.centerIn: parent
+          iconSize: Style.space(22)
+          icon: choice.iconName
+          color: choice.selected ? Color.popups.background : root.foreground
+        }
       }
 
-      ToggleSwitch {
-        id: tileSwitch
-        anchors.verticalCenter: parent.verticalCenter
-        checked: tile.checked
-        interactive: false
-        foreground: root.foreground
-        accent: root.foreground
+      Text {
+        width: parent.width
+        text: choice.label
+        color: choice.selected ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
       }
     }
 
     MouseArea {
-      id: tileMouse
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: tile.toggled()
-    }
-
-    PanelToolTip {
-      visible: tileMouse.containsMouse && tile.tip !== ""
-      text: tile.tip
-      fontFamily: root.fontFamily
+      onClicked: choice.chosen()
     }
   }
 
