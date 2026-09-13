@@ -656,7 +656,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(320))
+    contentWidth: panel.fittedContentWidth(Style.space(380))
     // 520 clipped the action buttons.
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
 
