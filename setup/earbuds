@@ -201,15 +201,16 @@ bt_name()     { bt_info | $NB_SED -n 's/^[[:space:]]*Name: //p' | $NB_HEAD -n 1;
 # ----------------------------------------------------------------- session
 
 # Model-gated features (super mic, enhanced bass, spatial) refuse until the
-# session knows the model, which `detect` resolves from the serial. Cheap
-# (~0.2s), idempotent, and failures are non-fatal for models it can't map.
+# session knows the model, which `detect` resolves from the serial. About
+# 0.1s, so it runs once per new session rather than on every read; failures
+# are non-fatal for models it can't map.
 ensure_model() {
   $NB_TIMEOUT --kill-after=2 10 "$EARCTL" detect >/dev/null 2>&1 || true
 }
 
 ensure_session() {
   # Probe with a real read: `session` keeps reporting active after the buds disconnect.
-  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && { ensure_model; return 0; }
+  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && return 0
 
   # auto-connect refuses with 409 while a dead session is registered.
   $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1
@@ -241,7 +242,8 @@ codec_map() {
   $NB_TIMEOUT --kill-after=2 5 "$NB_PACTL" list cards 2>/dev/null | $NB_HEAD -c 65536 | $NB_AWK -v card="$NB_CARD" '
     $1 == "Name:" { inblk = ($2 == card) }
     inblk && match($0, /(a2dp-sink[^:]*):.*codec ([A-Za-z0-9_-]+)/, m) {
-      print tolower(m[2]) "\t" m[1]
+      c = tolower(m[2]); gsub(/-/, "_", c)
+      print c "\t" m[1]
     }'
 }
 
@@ -286,15 +288,14 @@ cmd_status() {
     return 0
   fi
 
-  # A handful of round trips, about 0.2s each. A bad read is absent, not fatal.
-  # The last three are model-gated (Ear (3)); on other models they error fast
-  # and stay null, so the panel simply omits those controls.
-  local anc battery latency inear eq bass supermic
+  # Six round trips, about 0.1s each. A bad read is absent, not fatal.
+  # The last two are model-gated (Ear (3)); on other models they refuse in a
+  # few ms and stay null, so the panel simply omits those controls.
+  local anc battery latency inear bass supermic
   anc=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_HEAD -c 8192)
   battery=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192)
   latency=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency get 2>/dev/null | $NB_HEAD -c 8192)
   inear=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear get 2>/dev/null | $NB_HEAD -c 8192)
-  eq=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" eq get 2>/dev/null | $NB_HEAD -c 8192)
   bass=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass get 2>/dev/null | $NB_HEAD -c 8192)
   supermic=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic get 2>/dev/null | $NB_HEAD -c 8192)
 
@@ -307,7 +308,6 @@ cmd_status() {
     { $NB_JQ -cn --arg n "$name" --argjson p "$paired" '{connected:false, paired:$p, name:$n}'; return 0; }
   valid_json "$latency" || latency='{"low_latency_enabled":null}'
   valid_json "$inear" || inear='{"detection_enabled":null}'
-  valid_json "$eq" || eq='{"mode":null}'
   valid_json "$bass" || bass='{"enabled":null,"level":null}'
   valid_json "$supermic" || supermic='{"enabled":null}'
 
@@ -317,7 +317,7 @@ cmd_status() {
 
   $NB_JQ -cn --argjson anc "$anc" --argjson b "$battery" \
          --argjson lat "$latency" --argjson ie "$inear" \
-         --argjson eq "$eq" --argjson bass "$bass" --argjson sm "$supermic" \
+         --argjson bass "$bass" --argjson sm "$supermic" \
          --argjson ci "$codecinfo" --arg n "$name" '
     def lvl($x): if ($x | type) == "object" and ($x | has("Level"))
                  then $x.Level.percent else null end;
@@ -328,7 +328,6 @@ cmd_status() {
      charging: (chg($b.left) or chg($b.right)),
      low_latency: $lat.low_latency_enabled,
      in_ear: $ie.detection_enabled,
-     eq: $eq.mode,
      enhanced_bass: $bass.enabled,
      bass_level: $bass.level,
      super_mic: $sm.enabled,

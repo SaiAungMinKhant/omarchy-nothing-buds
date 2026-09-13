@@ -92,6 +92,14 @@ Panel {
   property bool bootstrapping: false
 
   property bool busy: false
+  // What the user just asked for, shown as selected (dimmed) until the next
+  // reading confirms or corrects it. Feedback lands on the click, not 1s later.
+  property string pendingAnc: ""
+  property string pendingCodec: ""
+  readonly property string shownAnc: pendingAnc !== "" ? pendingAnc : anc
+  readonly property string shownMode: Model.modeOf(shownAnc)
+  readonly property string shownStrength: Model.strengthOf(shownAnc)
+  readonly property string shownCodec: pendingCodec !== "" ? pendingCodec : codec
   property string lastError: ""
   // Find asks first: the tone is loud enough to hurt a bud still in an ear.
   property bool ringConfirmOpen: false
@@ -219,6 +227,8 @@ Panel {
     if (!text) return
     try {
       root.state = JSON.parse(text)
+      root.pendingAnc = ""
+      root.pendingCodec = ""
       root.lastError = ""
     } catch (e) {
       // Keep the previous reading rather than blanking the pill.
@@ -234,7 +244,7 @@ Panel {
 
   // Keep the ANC strength when switching modes.
   function setMode(next) {
-    if (next === "anc") setLevel(root.strength !== "" ? root.strength : "nc-high")
+    if (next === "anc") setLevel(root.shownStrength !== "" ? root.shownStrength : "nc-high")
     else if (next === "trans") setLevel("transparency")
     else setLevel("off")
   }
@@ -242,6 +252,7 @@ Panel {
   function setLevel(level) {
     if (root.busy || level === "") return
     root.busy = true
+    root.pendingAnc = level
     setProc.start(root.cmd(["set", "anc", level]))
   }
 
@@ -324,8 +335,9 @@ Panel {
   }
 
   function setCodec(name) {
-    if (root.busy || name === "" || name === root.codec) return
+    if (root.busy || name === "" || name === root.shownCodec) return
     root.busy = true
+    root.pendingCodec = String(name)
     codecProc.start(root.cmd(["set", "codec", String(name)]))
   }
 
@@ -498,14 +510,16 @@ Panel {
     }
   }
 
-  // Re-read so the panel shows the level the buds actually took.
+  // The wrapper echoes a fresh status after the set, so no second read.
   BoundedProcess {
     id: setProc
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
-      if (!ok && code === 124) root.lastError = "The earbuds command timed out."
-      Qt.callLater(root.refresh)
+      root.pendingAnc = ""
+      if (ok) root.apply(out)
+      else if (code === 124) root.lastError = "The earbuds command timed out."
+      else Qt.callLater(root.refresh)
     }
   }
 
@@ -585,14 +599,15 @@ Panel {
     onDone: function(code, out, err, ok) { Qt.callLater(root.refresh) }
   }
 
-  // Codec switch drops and re-adds the A2DP sink; the echoed status reflects it.
+  // The profile switch is immediate and the echoed status reflects it.
   BoundedProcess {
     id: codecProc
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
+      root.pendingCodec = ""
       if (ok) root.apply(out)
-      Qt.callLater(root.refresh)
+      else Qt.callLater(root.refresh)
     }
   }
 
@@ -923,7 +938,8 @@ Panel {
 
               width: strengthRow.cellWidth
               text: modelData.label
-              selected: root.strength === modelData.value
+              selected: root.shownStrength === modelData.value
+              opacity: selected && root.pendingAnc !== "" ? 0.55 : 1.0
               bordered: true
               foreground: root.foreground
               accent: root.foreground
@@ -1091,7 +1107,8 @@ Panel {
 
               width: codecRow.cellWidth
               text: String(modelData).toUpperCase()
-              selected: root.codec === modelData
+              selected: root.shownCodec === modelData
+              opacity: selected && root.pendingCodec !== "" ? 0.55 : 1.0
               bordered: true
               foreground: root.foreground
               accent: root.foreground
@@ -1209,7 +1226,8 @@ Panel {
     readonly property string iconName: value === "trans" ? "ear"
       : (value === "off" ? "prohibit" : "ear-slash")
 
-    readonly property bool selected: root.mode === value
+    readonly property bool selected: root.shownMode === value
+    readonly property bool pending: selected && root.pendingAnc !== ""
     readonly property real diameter: Style.space(44)
 
     implicitHeight: modeColumn.implicitHeight
@@ -1227,8 +1245,10 @@ Panel {
         color: modeButton.selected
           ? root.foreground
           : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+        opacity: modeButton.pending ? 0.55 : 1.0
 
         Behavior on color { ColorAnimation { duration: 180 } }
+        Behavior on opacity { NumberAnimation { duration: 120 } }
 
         PhosphorIcon {
           anchors.centerIn: parent
