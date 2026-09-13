@@ -35,8 +35,9 @@ trap 'nb_cleanup_build' EXIT
 trap 'nb_cleanup_build; exit 130' INT
 trap 'nb_cleanup_build; exit 143' TERM
 
-# Full commit SHA (earctl v0.1.2), never a movable tag.
-earctl_commit=81b24e15ffa12d04ddad957e8ac0da557e37b38d
+# Full commit SHA, never a movable tag. This is upstream master as of
+# 2026-09-13: v0.1.2 plus Ear (3), Super Mic, spatial audio and CMF Buds 2.
+earctl_commit=1315bfbf07eb74b946606e30ede2d4290449082f
 
 interactive() { [[ -t 0 && -t 1 ]]; }
 say()  { interactive && printf '\n\033[1m%s\033[0m\n' "$*"; return 0; }
@@ -73,7 +74,48 @@ check_installed() {
   [[ -f $NB_EARCTL_FALLBACK && -x $NB_EARCTL_FALLBACK ]] ||
     [[ -e $NB_BIN_DIR/earctl && ! -L $NB_BIN_DIR/earctl && -f $NB_BIN_DIR/earctl && -x $NB_BIN_DIR/earctl ]] ||
     return 1
+  # An earctl this plugin built is out of date once the pin moves. A
+  # user-provided one is theirs and never judged.
+  if nb_manifest_has file "$NB_BIN_DIR/earctl"; then
+    [[ $(built_earctl_commit) == "$earctl_commit" ]] || return 1
+  fi
   return 0
+}
+
+# Commit recorded at the last build, empty when unknown.
+built_earctl_commit() {
+  local rec=""
+  nb_read_bounded "$NB_EARCTL_COMMIT_FILE" 64 rec || rec=""
+  printf '%s' "${rec%$'\r'}"
+}
+
+# Fetch the pinned commit, check it out detached, verify HEAD, build with the
+# committed lockfile, and publish over $NB_BIN_DIR/earctl. Terminal only.
+build_earctl() {
+  local earctl_cargo got
+  earctl_cargo=$(nb_cargo) ||
+    nb_fail 2 "need a Rust toolchain to build pinned earctl; install Rust and re-run"
+  say "Building earctl $earctl_commit from source"
+  build_tmp=$($NB_MKTEMP -d) || nb_fail 6 "mktemp failed"
+
+  $NB_GIT init -q "$build_tmp/earctl" &&
+    $NB_GIT -C "$build_tmp/earctl" remote add origin https://github.com/DaanHessen/earctl.git &&
+    $NB_GIT -C "$build_tmp/earctl" fetch -q --depth 1 origin "$earctl_commit" &&
+    $NB_GIT -C "$build_tmp/earctl" checkout -q --detach "$earctl_commit" ||
+    nb_fail 2 "could not fetch earctl $earctl_commit"
+
+  got=$($NB_GIT -C "$build_tmp/earctl" rev-parse HEAD)
+  [[ $got == "$earctl_commit" ]] ||
+    nb_fail 2 "earctl checkout is $got, expected $earctl_commit"
+
+  (cd "$build_tmp/earctl" && "$earctl_cargo" build --release --locked) ||
+    nb_fail 2 "earctl build failed"
+
+  # Same ownership checks as everywhere else: a foreign ~/.local/bin/earctl is refused.
+  nb_install_file "$build_tmp/earctl/target/release/earctl" "$NB_BIN_DIR/earctl" 755
+  nb_write_owned "$NB_EARCTL_COMMIT_FILE" 644 "$earctl_commit"
+  NB_EARCTL_PATH=$NB_BIN_DIR/earctl
+  NB_EARCTL_OURS=file
 }
 
 for arg in "$@"; do
@@ -126,6 +168,11 @@ elif [[ -e $NB_BIN_DIR/earctl && ! -L $NB_BIN_DIR/earctl && -f $NB_BIN_DIR/earct
   NB_EARCTL_PATH=$NB_BIN_DIR/earctl
   if nb_manifest_has file "$NB_BIN_DIR/earctl"; then
     NB_EARCTL_OURS=file
+    if [[ $(built_earctl_commit) != "$earctl_commit" ]]; then
+      # Built by an earlier version of this plugin from an older pin.
+      interactive || nb_fail 2 "earctl was built from an older commit; run setup in a terminal to rebuild it"
+      build_earctl
+    fi
   else
     NB_EARCTL_OURS=pre
     nb_manifest_set pre "$NB_BIN_DIR/earctl" || nb_fail 6 "could not record manifest"
@@ -133,35 +180,9 @@ elif [[ -e $NB_BIN_DIR/earctl && ! -L $NB_BIN_DIR/earctl && -f $NB_BIN_DIR/earct
 fi
 
 if [[ -z $NB_EARCTL_PATH ]]; then
-  if ! interactive; then
-    # Keep the potentially lengthy source build in a terminal with visible progress.
-    nb_fail 2 "earctl is not installed and this is not a terminal"
-  fi
-  if earctl_cargo=$(nb_cargo); then
-    say "Building earctl $earctl_commit from source"
-    build_tmp=$($NB_MKTEMP -d) || nb_fail 6 "mktemp failed"
-
-    # Fetch the pinned commit, check it out detached, verify HEAD before building.
-    $NB_GIT init -q "$build_tmp/earctl" &&
-      $NB_GIT -C "$build_tmp/earctl" remote add origin https://github.com/DaanHessen/earctl.git &&
-      $NB_GIT -C "$build_tmp/earctl" fetch -q --depth 1 origin "$earctl_commit" &&
-      $NB_GIT -C "$build_tmp/earctl" checkout -q --detach "$earctl_commit" ||
-      nb_fail 2 "could not fetch earctl $earctl_commit"
-
-    got=$($NB_GIT -C "$build_tmp/earctl" rev-parse HEAD)
-    [[ $got == "$earctl_commit" ]] ||
-      nb_fail 2 "earctl checkout is $got, expected $earctl_commit"
-
-    (cd "$build_tmp/earctl" && "$earctl_cargo" build --release --locked) ||
-      nb_fail 2 "earctl build failed"
-
-    # Same ownership checks as everywhere else: a foreign ~/.local/bin/earctl is refused.
-    nb_install_file "$build_tmp/earctl/target/release/earctl" "$NB_BIN_DIR/earctl" 755
-    NB_EARCTL_PATH=$NB_BIN_DIR/earctl
-    NB_EARCTL_OURS=file
-  else
-    nb_fail 2 "need a Rust toolchain to build pinned earctl; install Rust and re-run"
-  fi
+  # Keep the potentially lengthy source build in a terminal with visible progress.
+  interactive || nb_fail 2 "earctl is not installed and this is not a terminal"
+  build_earctl
 fi
 
 [[ -f $NB_EARCTL_PATH && -x $NB_EARCTL_PATH ]] ||

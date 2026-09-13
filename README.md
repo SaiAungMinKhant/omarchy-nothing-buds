@@ -16,6 +16,10 @@ The panel follows your Omarchy theme; both shots are the same build.
 - Per-bud and case battery. The meter turns urgent below 20% and pulses while
   charging.
 - Low lag mode and in-ear detection.
+- Ultra bass with five levels, and spatial audio, on CMF Buds 2 and Nothing
+  Ear (3). Super Mic on Ear (3). The panel shows what the model reports.
+- Audio codec, switched through PipeWire. Switching interrupts playback for a
+  few seconds while the link renegotiates.
 - Connect and disconnect the buds from the panel header.
 - Find my buds. It asks first, since the tone is loud enough to hurt a bud
   still in an ear. The tone stops itself after 8 seconds.
@@ -29,7 +33,7 @@ See [RFCOMM channel](#rfcomm-channel).
 
 | | |
 |---|---|
-| [earctl](https://github.com/DaanHessen/earctl) | Speaks the Nothing RFCOMM protocol. AGPL-3.0. This plugin calls it as a separate program over its local HTTP API and does not bundle it. Setup builds missing earctl from the exact commit behind v0.1.2, using its Cargo.lock |
+| [earctl](https://github.com/DaanHessen/earctl) | Speaks the Nothing RFCOMM protocol. AGPL-3.0. This plugin calls it as a separate program over its local HTTP API and does not bundle it. Setup builds missing earctl from an exact pinned commit, using its Cargo.lock |
 | `bluez-utils` | `bluetoothctl`, for link state and connect/disconnect |
 | `jq` | The wrapper builds its JSON output with it |
 
@@ -65,11 +69,17 @@ opens a terminal, where the installer prints its plan and asks
 and the native build dependencies for earctl available first.
 
 Missing earctl is always built from commit
-`81b24e15ffa12d04ddad957e8ac0da557e37b38d`. Setup fetches that exact commit,
-checks it out detached, verifies HEAD, and runs `cargo build --release --locked`
-so dependency resolution must match the committed lockfile. The binary goes
-into `~/.local/bin/earctl`. Setup never installs an AUR package, even when
-`yay` is available. An existing earctl is reused as a user-provided dependency.
+`1315bfbf07eb74b946606e30ede2d4290449082f`, upstream master as of
+2026-09-13 with Ear (3), Super Mic, spatial audio and CMF Buds 2 support.
+Setup fetches that exact commit, checks it out detached, verifies HEAD, and
+runs `cargo build --release --locked` so dependency resolution must match the
+committed lockfile. The binary goes into `~/.local/bin/earctl` and the commit
+is recorded next to the manifest. When a later version of this plugin moves
+the pin, setup sees the recorded commit no longer matches and rebuilds, in a
+terminal. Setup never installs an AUR package, even when `yay` is available.
+An existing earctl is reused as a user-provided dependency and never rebuilt;
+if it predates the pinned commit, the extra controls stay hidden until you
+update it yourself.
 
 Every file is written atomically (temp file + rename, never through a
 symlink), recorded in a manifest at
@@ -195,15 +205,13 @@ issue with the model and channel.
 
 ## What is not here
 
-None of these are hardware limits. The Nothing X app drives all four on the
-same earbuds. They are gaps in earctl.
+None of these are hardware limits. The Nothing X app drives both on the
+same earbuds.
 
 | | |
 |---|---|
-| Equalizer | `eq set` returns ok and the device ignores it. It always reads back mode 0 |
-| Ultra bass | Rejected as unsupported. `earctl detect` returns `model_id: null` because B179 is missing from its model table |
-| Spatial audio | No protocol opcode in earctl at all |
-| Gestures | Readable over `/api/gestures` as raw numeric codes, with no name mapping |
+| Equalizer | `eq get` always reads back mode 0 on CMF Buds 2, whatever the app shows, so the preset ids are unmapped |
+| Gestures | earctl decodes them now (`earctl gestures get`), but the panel has no gesture editor |
 
 ## Security
 

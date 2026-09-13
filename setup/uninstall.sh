@@ -217,6 +217,10 @@ if [[ $manifest_mode == true ]]; then
   case $? in
     1|2|6) partial=1 ;;
   esac
+  nb_remove_owned_file "$NB_EARCTL_COMMIT_FILE" "$(nb_manifest_sha "$NB_EARCTL_COMMIT_FILE")"
+  case $? in
+    1|2|6) partial=1 ;;
+  esac
   # The wrapper's discovered channel. Ours by location, not hashed.
   if [[ -L $NB_STATE_DIR/channel ]]; then
     nb_err "leaving $NB_STATE_DIR/channel: it is a symlink"

@@ -250,7 +250,7 @@ elif [[ $3 == rev-parse ]]; then
   if [[ -f "$fake/git-wrong-head" ]]; then
     echo 0000000000000000000000000000000000000000
   else
-    echo 81b24e15ffa12d04ddad957e8ac0da557e37b38d
+    echo 1315bfbf07eb74b946606e30ede2d4290449082f
   fi
 fi
 EOF
@@ -360,12 +360,32 @@ M=$(manifest_of)
 assert_line "manifest records the binary" "file$(printf '\t')$H/.local/bin/earctl" "$M"
 assert_no_line "no package ownership recorded" "^pkg" "$M"
 assert_no_line "yay never invoked despite being available" "yay" "$FAKE/log"
-assert_line "exact commit fetched" "fetch -q --depth 1 origin 81b24e15ffa12d04ddad957e8ac0da557e37b38d" "$FAKE/log"
-assert_line "detached checkout" "checkout -q --detach 81b24e15ffa12d04ddad957e8ac0da557e37b38d" "$FAKE/log"
+assert_line "exact commit fetched" "fetch -q --depth 1 origin 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
+assert_line "detached checkout" "checkout -q --detach 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
 assert_line "HEAD verified" "rev-parse HEAD" "$FAKE/log"
 assert_line "locked build through the Cargo proxy" "cargo build --release --locked" "$FAKE/log"
 assert_eq "earctl-bin records built binary" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-bin")" "$H/.local/bin/earctl"
 assert_line "unit uses built binary" "^ExecStart=$H/.local/bin/earctl server" "$H/.config/systemd/user/earctl.service"
+
+step "S5a: a plugin-built earctl from an older pin is rebuilt, a user's is not"
+assert_eq "build commit recorded" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "1315bfbf07eb74b946606e30ede2d4290449082f"
+run_install --check
+assert_rc "check passes on the pinned build" 0 "$?"
+# An install from before 0.0.7 never recorded the build commit at all.
+/usr/bin/rm -f -- "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit"
+run_install --check
+assert_rc "check reports a stale build" 1 "$?"
+log_reset
+run_install --yes
+assert_rc "non-terminal setup defers the rebuild with exit 2" 2 "$?"
+assert_no_line "no build outside a terminal" "cargo build" "$FAKE/log"
+log_reset
+run_pty install.sh
+assert_rc "terminal setup rebuilds" 0 "$?"
+assert_line "rebuilt from the pin" "fetch -q --depth 1 origin 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
+assert_eq "build commit updated" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "1315bfbf07eb74b946606e30ede2d4290449082f"
+run_install --check
+assert_rc "check passes after the rebuild" 0 "$?"
 
 step "S5b: uninstall removes the recorded binary; --keep-earctl keeps it"
 log_reset
