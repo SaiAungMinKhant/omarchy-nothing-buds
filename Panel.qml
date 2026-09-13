@@ -92,8 +92,8 @@ Panel {
   property bool bootstrapping: false
 
   property bool busy: false
-  // What the user just asked for, shown as applied until the next reading
-  // confirms or corrects it. Feedback lands on the click, not 1s later.
+  // What the user just asked for. Shown as applied until the next reading
+  // confirms or corrects it, so the click itself is the feedback.
   property string pendingAnc: ""
   property string pendingCodec: ""
   // -1 none, 0 off, 1 on
@@ -256,9 +256,9 @@ Panel {
     else setLevel("off")
   }
 
-  // A click wins over a status poll (abandon it) and over an earlier click
-  // of the same kind (start() supersedes). Only a different set in flight
-  // refuses, so two writes never race on the one RFCOMM session.
+  // A click beats a status poll, which is abandoned, and an earlier click
+  // of the same kind, which start() supersedes. A different set still in
+  // flight refuses, so two writes never race on the one RFCOMM session.
   function claim(proc) {
     if (!root.busy) { root.busy = true; return true }
     if (statusProc.live) { statusProc.stop(); return true }
@@ -612,8 +612,8 @@ Panel {
     onDone: function(code, out, err, ok) { Qt.callLater(root.refresh) }
   }
 
-  // The wrapper waits for the sink to return before echoing status, so the
-  // spinner runs for the real length of the switch.
+  // The wrapper waits for the sink to come back before it echoes status,
+  // so the spinner runs for as long as the switch really takes.
   BoundedProcess {
     id: codecProc
     deadline: "20"
@@ -1121,11 +1121,10 @@ Panel {
               readonly property bool switching: root.pendingCodec === modelData
 
               width: codecRow.cellWidth
-              // The A2DP link renegotiates for a few seconds: the chip shows
-              // only a spinning icon until the new codec reads back.
-              // Icon only while switching, centred by the button itself. The
-              // height is held at the chip's resting height so the row
-              // does not move.
+              // Switching renegotiates the A2DP link, which takes a few
+              // seconds. The chip shows only a spinning icon until the new
+              // codec reads back, centred by the button itself, and keeps
+              // its resting height so the row does not move.
               property real restingHeight: 0
               onImplicitHeightChanged: if (!switching) restingHeight = implicitHeight
               height: switching && restingHeight > 0 ? restingHeight : implicitHeight
