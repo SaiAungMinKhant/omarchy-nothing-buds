@@ -93,8 +93,8 @@ Panel {
 
   property bool busy: false
   property string lastError: ""
-  // First click on Find only arms the tone; the second one plays it.
-  property bool ringArmed: false
+  // Find asks first: the tone is loud enough to hurt a bud still in an ear.
+  property bool ringConfirmOpen: false
 
   function probeCmd() { return [setupScript, "--check"] }
 
@@ -228,35 +228,31 @@ Panel {
     setProc.start(root.cmd(["set", "anc", level]))
   }
 
-  // Two steps on purpose: the tone is loud enough to hurt a bud still in an
-  // ear, so the first click only warns and the second one rings.
-  function armRing() {
+  function askRing() {
     if (!root.connected || !root.setupComplete || ringTimer.running) return
-    root.ringArmed = true
-    ringArmTimer.restart()
+    ringConfirm.selectedIndex = 1
+    root.ringConfirmOpen = true
   }
 
-  function disarmRing() {
-    ringArmTimer.stop()
-    root.ringArmed = false
+  function cancelRing() {
+    root.ringConfirmOpen = false
   }
 
   function ring() {
+    root.ringConfirmOpen = false
     if (!root.connected) return
-    root.disarmRing()
     ringProc.start(root.cmd(["ring"]))
     ringTimer.restart()
   }
 
-  // The one click the Find button acts on: warn first, ring on the next one.
+  // The one click the Find button acts on: ask first, or stop a running tone.
   function toggleRing() {
     if (ringTimer.running) root.stopRing()
-    else if (root.ringArmed) root.ring()
-    else root.armRing()
+    else root.askRing()
   }
 
   function stopRing() {
-    root.disarmRing()
+    root.ringConfirmOpen = false
     ringTimer.stop()
     unringProc.start(root.cmd(["unring"]))
   }
@@ -292,10 +288,9 @@ Panel {
   // BlueZ said so; ask the wrapper for details now rather than next poll.
   onLinkUpChanged: Qt.callLater(root.refresh)
 
-  // Closing the panel or losing the buds drops the warning; reopening starts
-  // from Find again.
-  onOpenedChanged: if (!root.opened) root.disarmRing()
-  onConnectedChanged: if (!root.connected) root.disarmRing()
+  // Closing the panel or losing the buds withdraws the question.
+  onOpenedChanged: if (!root.opened) root.cancelRing()
+  onConnectedChanged: if (!root.connected) root.cancelRing()
 
   // ------------------------------------------------------------------ setup
   // processes
@@ -478,15 +473,6 @@ Panel {
     onTriggered: root.stopRing()
   }
 
-  // The warning lapses on its own, so a panel left open cannot ring on a
-  // single stray click minutes later.
-  Timer {
-    id: ringArmTimer
-    interval: 6000
-    repeat: false
-    onTriggered: root.ringArmed = false
-  }
-
   // bluetoothctl plus the RFCOMM re-establish take a few seconds.
   BoundedProcess {
     id: linkProc
@@ -542,9 +528,21 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onCloseRequested: root.ringConfirmOpen ? root.cancelRing() : root.close()
+      onTabRequested: function(direction) {
+        if (root.ringConfirmOpen) ringConfirm.selectedIndex = ringConfirm.selectedIndex === 0 ? 1 : 0
+        else root.switchPanel(direction)
+      }
+      onMoveRequested: function(dx, dy) {
+        if (root.ringConfirmOpen && dx !== 0) ringConfirm.selectedIndex = ringConfirm.selectedIndex === 0 ? 1 : 0
+      }
+      onActivateRequested: {
+        if (!root.ringConfirmOpen) return
+        if (ringConfirm.selectedIndex === 0) root.cancelRing()
+        else root.ring()
+      }
       onTextKey: function(t) {
+        if (root.ringConfirmOpen) return
         if (t === "r" || t === "R") root.refresh()
         else if (t === "f" || t === "F") root.toggleRing()
         else if (t === "1") root.setMode("off")
@@ -553,6 +551,24 @@ Panel {
         else if (t === "0") root.setLink(!root.connected)
         else if (t === "l" || t === "L") root.setLatency(!root.lowLatency)
         else if (t === "i" || t === "I") root.setInEar(!root.inEar)
+      }
+
+      // Sits over the whole card; the scrim swallows clicks and the key
+      // catcher routes Esc, Tab, arrows and Enter to it while it is open.
+      // Local copy of the shell's ConfirmDialog so the buttons can be centred.
+      ConfirmCard {
+        id: ringConfirm
+        anchors.fill: parent
+        z: 10
+        opened: root.ringConfirmOpen
+        message: "This will ring the earbuds loudly,\nare you sure?"
+        confirmText: "Ring"
+        background: root.bar ? root.bar.background : Color.background
+        foreground: root.foreground
+        urgent: root.urgent
+        fontFamily: root.fontFamily
+        onCanceled: root.cancelRing()
+        onConfirmed: root.ring()
       }
 
       Column {
@@ -891,26 +907,13 @@ Panel {
 
         PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
 
-        Text {
-          visible: root.ringArmed
-          width: parent.width
-          text: "The tone is loud. Take the buds out of your ears first, "
-              + "then click Ring now."
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
-
         Button {
           width: parent.width
           enabled: root.connected && root.setupComplete
           opacity: root.connected && root.setupComplete ? 1.0 : 0.45
-          text: ringTimer.running ? "Stop" : (root.ringArmed ? "Ring now" : "Find")
+          text: ringTimer.running ? "Stop" : "Find (f)"
           iconText: "󰂚"
-          tooltipText: ringTimer.running ? "Stop the tone"
-            : (root.ringArmed ? "Click again to ring both buds"
-                              : "Ring both buds, after a warning")
+          tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds (asks first)"
           bordered: true
           foreground: root.foreground
           accent: root.foreground
