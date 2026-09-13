@@ -17,7 +17,8 @@ The panel follows your Omarchy theme; both shots are the same build.
   charging.
 - Low lag mode and in-ear detection.
 - Connect and disconnect the buds from the panel header.
-- Find my buds. The tone stops itself after 8 seconds.
+- Find my buds. It asks first, since the tone is loud enough to hurt a bud
+  still in an ear. The tone stops itself after 8 seconds.
 
 Developed against CMF Buds 2 (B179). Other Nothing and CMF models speak the
 same protocol, but I have only tested that one. If the panel never connects,
