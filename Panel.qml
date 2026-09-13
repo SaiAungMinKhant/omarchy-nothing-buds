@@ -256,9 +256,17 @@ Panel {
     else setLevel("off")
   }
 
+  // A click wins over a status poll (abandon it) and over an earlier click
+  // of the same kind (start() supersedes). Only a different set in flight
+  // refuses, so two writes never race on the one RFCOMM session.
+  function claim(proc) {
+    if (!root.busy) { root.busy = true; return true }
+    if (statusProc.live) { statusProc.stop(); return true }
+    return proc.live
+  }
+
   function setLevel(level) {
-    if (root.busy || level === "") return
-    root.busy = true
+    if (level === "" || !root.claim(setProc)) return
     root.pendingAnc = Model.longOf(level)
     setProc.start(root.cmd(["set", "anc", level]))
   }
@@ -300,38 +308,33 @@ Panel {
   }
 
   function setLatency(on) {
-    if (root.busy) return
-    root.busy = true
+    if (!root.claim(latencyProc)) return
     root.pendingLatency = on ? 1 : 0
     latencyProc.start(root.cmd(["set", "latency", on ? "true" : "false"]))
   }
 
   function setInEar(on) {
-    if (root.busy) return
-    root.busy = true
+    if (!root.claim(inEarProc)) return
     root.pendingInEar = on ? 1 : 0
     inEarProc.start(root.cmd(["set", "in-ear", on ? "true" : "false"]))
   }
 
   function setSuperMic(on) {
-    if (root.busy) return
-    root.busy = true
+    if (!root.claim(superMicProc)) return
     superMicProc.start(root.cmd(["set", "super-mic", on ? "true" : "false"]))
   }
 
   // Enabling bass keeps the current level (or 2 the first time). The wrapper
   // clears spatial when bass turns on; mirror that locally so the tile agrees.
   function setEnhancedBass(on) {
-    if (root.busy) return
-    root.busy = true
+    if (!root.claim(bassProc)) return
     if (on) root.spatialFixed = false
     var lvl = root.bassLevel >= 1 && root.bassLevel <= 5 ? root.bassLevel : 3
     bassProc.start(root.cmd(["set", "enhanced-bass", on ? "true" : "false", String(lvl)]))
   }
 
   function setBassLevel(n) {
-    if (root.busy || n < 1 || n > 5) return
-    root.busy = true
+    if (n < 1 || n > 5 || !root.claim(bassProc)) return
     root.spatialFixed = false
     bassProc.start(root.cmd(["set", "enhanced-bass", "true", String(n)]))
   }
@@ -344,8 +347,7 @@ Panel {
   }
 
   function setCodec(name) {
-    if (root.busy || name === "" || name === root.shownCodec) return
-    root.busy = true
+    if (name === "" || name === root.shownCodec || !root.claim(codecProc)) return
     root.pendingCodec = String(name)
     codecProc.start(root.cmd(["set", "codec", String(name)]))
   }
