@@ -99,12 +99,14 @@ Panel {
   // -1 none, 0 off, 1 on
   property int pendingLatency: -1
   property int pendingInEar: -1
+  property int pendingBassLevel: 0
   readonly property string shownAnc: pendingAnc !== "" ? pendingAnc : anc
   readonly property string shownMode: Model.modeOf(shownAnc)
   readonly property string shownStrength: Model.strengthOf(shownAnc)
   readonly property string shownCodec: pendingCodec !== "" ? pendingCodec : codec
   readonly property bool shownLatency: pendingLatency >= 0 ? pendingLatency === 1 : lowLatency
   readonly property bool shownInEar: pendingInEar >= 0 ? pendingInEar === 1 : inEar
+  readonly property int shownBassLevel: pendingBassLevel > 0 ? pendingBassLevel : bassLevel
   property string lastError: ""
   // Find asks first: the tone is loud enough to hurt a bud still in an ear.
   property bool ringConfirmOpen: false
@@ -241,6 +243,7 @@ Panel {
       root.pendingCodec = ""
       root.pendingLatency = -1
       root.pendingInEar = -1
+      root.pendingBassLevel = 0
       root.lastError = ""
     } catch (e) {
       // Keep the previous reading rather than blanking the pill.
@@ -340,6 +343,7 @@ Panel {
 
   function setBassLevel(n) {
     if (n < 1 || n > 5 || !root.claim(bassProc)) return
+    root.pendingBassLevel = n
     if (root.bassExcludesSpatial) root.spatialFixed = false
     bassProc.start(root.cmd(["set", "enhanced-bass", "true", String(n)]))
   }
@@ -606,6 +610,7 @@ Panel {
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
+      root.pendingBassLevel = 0
       if (ok) root.apply(out)
     }
   }
@@ -1014,45 +1019,43 @@ Panel {
           fontFamily: root.fontFamily
         }
 
-        Toggle {
+        Grid {
+          id: playbackGrid
           visible: root.connected && root.setupComplete
           width: parent.width
-          label: "Low lag mode"
-          description: "Lower audio delay for games"
-          checked: root.shownLatency
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.setLatency(!root.shownLatency)
-        }
+          columns: 2
+          columnSpacing: Style.space(8)
+          rowSpacing: Style.space(8)
 
-        Toggle {
-          visible: root.connected && root.setupComplete
-          width: parent.width
-          label: "In-ear detection"
-          description: "Pause when a bud is removed"
-          checked: root.shownInEar
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.setInEar(!root.shownInEar)
-        }
+          readonly property real cellWidth: (width - columnSpacing) / 2
 
-        Toggle {
-          visible: root.connected && root.setupComplete && root.hasSuperMic
-          width: parent.width
-          label: "Super Mic"
-          description: "Case Talk-button mic for calls"
-          checked: root.superMic
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.setSuperMic(!root.superMic)
+          ToggleTile {
+            width: playbackGrid.cellWidth
+            label: "Low lag"
+            tip: "Lower audio delay for games"
+            checked: root.shownLatency
+            onToggled: root.setLatency(!root.shownLatency)
+          }
+
+          ToggleTile {
+            width: playbackGrid.cellWidth
+            label: "In-ear"
+            tip: "Pause when a bud is removed"
+            checked: root.shownInEar
+            onToggled: root.setInEar(!root.shownInEar)
+          }
+
+          ToggleTile {
+            visible: root.hasSuperMic
+            width: playbackGrid.cellWidth
+            label: "Super Mic"
+            tip: "Case Talk-button mic for calls"
+            checked: root.superMic
+            onToggled: root.setSuperMic(!root.superMic)
+          }
         }
 
         // Laid out as in Nothing X: two round choices, Fixed and Off.
-        PanelSeparator { visible: root.connected && root.hasSpatial; width: parent.width; foreground: root.foreground }
-
         PanelSectionHeader {
           visible: root.connected && root.setupComplete && root.hasSpatial
           text: "Spatial audio"
@@ -1084,20 +1087,11 @@ Panel {
         }
 
         // Ultra bass as in Nothing X: a switch, and a five-step slider while on.
-        PanelSeparator { visible: root.connected && root.hasEnhancedBass; width: parent.width; foreground: root.foreground }
-
-        PanelSectionHeader {
-          visible: root.connected && root.setupComplete && root.hasEnhancedBass
-          text: "Ultra bass"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
-
         Toggle {
           visible: root.connected && root.setupComplete && root.hasEnhancedBass
           width: parent.width
           label: "Ultra bass"
-          description: root.enhancedBass ? "Level " + root.bassLevel : "Off"
+          description: root.enhancedBass ? "Level " + root.shownBassLevel : "Off"
           checked: root.enhancedBass
           foreground: root.foreground
           accent: root.foreground
@@ -1120,7 +1114,7 @@ Panel {
             step: 1
             integer: true
             tickCount: 5
-            value: root.bassLevel
+            value: root.shownBassLevel
             onReleased: function(v) { root.setBassLevel(Math.round(v)) }
           }
         }
@@ -1207,6 +1201,69 @@ Panel {
           wrapMode: Text.WordWrap
         }
       }
+    }
+  }
+
+  // Compact half-width switch tile for the Playback grid. Fill and border
+  // come from the theme foreground, as in ModeButton. The row owns the
+  // click; the switch is presentation only.
+  component ToggleTile: Rectangle {
+    id: tile
+
+    property string label: ""
+    property string tip: ""
+    property bool checked: false
+    signal toggled()
+
+    readonly property bool hot: tileMouse.containsMouse
+
+    implicitHeight: Style.space(46)
+    radius: Style.cornerRadius
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.08 : 0.04)
+    border.width: 1
+    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.25 : 0.14)
+
+    Behavior on color { ColorAnimation { duration: 100 } }
+
+    Row {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(6)
+
+      Text {
+        width: parent.width - tileSwitch.width - parent.spacing
+        anchors.verticalCenter: parent.verticalCenter
+        text: tile.label
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      ToggleSwitch {
+        id: tileSwitch
+        anchors.verticalCenter: parent.verticalCenter
+        checked: tile.checked
+        interactive: false
+        foreground: root.foreground
+        accent: root.foreground
+      }
+    }
+
+    MouseArea {
+      id: tileMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tile.toggled()
+    }
+
+    PanelToolTip {
+      visible: tileMouse.containsMouse && tile.tip !== ""
+      text: tile.tip
+      fontFamily: root.fontFamily
     }
   }
 
@@ -1341,32 +1398,27 @@ Panel {
       width: parent.width
       spacing: Style.space(4)
 
-      Text {
-        text: tile.label
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      Row {
+      // "LEFT   75%" on one line keeps the section short.
+      Item {
         width: parent.width
-        spacing: Style.space(3)
+        implicitHeight: labelText.implicitHeight
 
         Text {
-          text: tile.known ? tile.value : "—"
-          color: tile.tone
+          id: labelText
+          anchors.left: parent.left
+          text: tile.label
+          color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.title
+          font.pixelSize: Style.font.caption
         }
 
         Text {
-          visible: tile.known
-          text: "%"
+          anchors.right: parent.right
+          anchors.baseline: labelText.baseline
+          text: tile.known ? tile.value + "%" : "—"
           color: tile.tone
-          opacity: 0.6
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
-          anchors.baseline: parent.children[0].baseline
         }
       }
 
