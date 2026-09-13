@@ -200,9 +200,9 @@ Panel {
   // support them, so `has*` gates whether the control appears at all.
   readonly property bool hasSuperMic: connected && typeof state.super_mic === "boolean"
   // Spatial audio has no getter, so support comes from the model earctl
-  // resolved. Ear (3) and CMF Buds 2 take it; on Ear (3) it excludes bass.
+  // resolved. Ear (3) takes it and there it excludes bass.
   readonly property string modelBase: connected && state.model_base ? String(state.model_base) : ""
-  readonly property bool hasSpatial: modelBase === "B173" || modelBase === "B179"
+  readonly property bool hasSpatial: modelBase === "B173"
   readonly property bool bassExcludesSpatial: modelBase === "B173"
   readonly property bool superMic: connected && state.super_mic === true
   readonly property bool hasEnhancedBass: connected && typeof state.enhanced_bass === "boolean"
