@@ -208,6 +208,13 @@ ensure_model() {
   $NB_TIMEOUT --kill-after=2 10 "$EARCTL" detect >/dev/null 2>&1 || true
 }
 
+# Model base earctl resolved for the session (B179, B173, ...), empty if
+# none. A local HTTP call, no round trip to the buds.
+model_base() {
+  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" session 2>/dev/null | $NB_HEAD -c 8192 |
+    $NB_JQ -r '.model.base // empty' 2>/dev/null | $NB_HEAD -c 16
+}
+
 ensure_session() {
   # Probe with a real read: `session` keeps reporting active after the buds disconnect.
   $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1 && return 0
@@ -299,13 +306,14 @@ cmd_status() {
   # Six round trips, about 0.1s each. A bad read is absent, not fatal.
   # The last two exist on Ear (3) only. Other models refuse them in a few
   # ms and the fields stay null, so the panel omits those controls.
-  local anc battery latency inear bass supermic
+  local anc battery latency inear bass supermic base
   anc=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_HEAD -c 8192)
   battery=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192)
   latency=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency get 2>/dev/null | $NB_HEAD -c 8192)
   inear=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear get 2>/dev/null | $NB_HEAD -c 8192)
   bass=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass get 2>/dev/null | $NB_HEAD -c 8192)
   supermic=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic get 2>/dev/null | $NB_HEAD -c 8192)
+  base=$(model_base)
 
   # earctl serializes AncLevel as a JSON string, not an object.
   $NB_JQ -e 'type == "string" and
@@ -326,7 +334,7 @@ cmd_status() {
   $NB_JQ -cn --argjson anc "$anc" --argjson b "$battery" \
          --argjson lat "$latency" --argjson ie "$inear" \
          --argjson bass "$bass" --argjson sm "$supermic" \
-         --argjson ci "$codecinfo" --arg n "$name" '
+         --argjson ci "$codecinfo" --arg n "$name" --arg base "$base" '
     def lvl($x): if ($x | type) == "object" and ($x | has("Level"))
                  then $x.Level.percent else null end;
     def chg($x): if ($x | type) == "object" and ($x | has("Level"))
@@ -339,6 +347,7 @@ cmd_status() {
      enhanced_bass: $bass.enabled,
      bass_level: $bass.level,
      super_mic: $sm.enabled,
+     model_base: (if $base == "" then null else $base end),
      codec: $ci.codec,
      codecs: $ci.codecs}'
 }
@@ -397,14 +406,13 @@ cmd_set() {
     anc)     $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc set "${2:-off}" >/dev/null 2>&1 ;;
     super-mic) $NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic set "${2:-false}" >/dev/null 2>&1 ;;
     enhanced-bass)
-      # Bass and spatial audio are mutually exclusive on the device: setting
-      # one clears the other. Clear spatial FIRST so bass wins (order matters,
-      # the second write is the one that sticks).
-      [[ ${2:-false} == true ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio off >/dev/null 2>&1
+      # On Ear (3) bass and spatial audio are exclusive and the second write
+      # wins, so clear spatial first. CMF Buds 2 keeps both.
+      [[ ${2:-false} == true && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio off >/dev/null 2>&1
       $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled "${2:-false}" --level "${3:-2}" >/dev/null 2>&1 ;;
     spatial)
-      # Same exclusivity the other way: clear bass first so spatial wins.
-      [[ ${2:-off} == fixed ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled false >/dev/null 2>&1
+      # The same the other way round, Ear (3) only.
+      [[ ${2:-off} == fixed && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled false >/dev/null 2>&1
       $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio "${2:-off}" >/dev/null 2>&1 ;;
     *)       printf 'unknown setting: %s\n' "${1:-}" >&2; return 64 ;;
   esac

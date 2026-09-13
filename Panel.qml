@@ -197,6 +197,11 @@ Panel {
   // Ear (3)-only features. The wrapper reports null on models that don't
   // support them, so `has*` gates whether the control appears at all.
   readonly property bool hasSuperMic: connected && typeof state.super_mic === "boolean"
+  // Spatial audio has no getter, so support comes from the model earctl
+  // resolved. Ear (3) and CMF Buds 2 take it; on Ear (3) it excludes bass.
+  readonly property string modelBase: connected && state.model_base ? String(state.model_base) : ""
+  readonly property bool hasSpatial: modelBase === "B173" || modelBase === "B179"
+  readonly property bool bassExcludesSpatial: modelBase === "B173"
   readonly property bool superMic: connected && state.super_mic === true
   readonly property bool hasEnhancedBass: connected && typeof state.enhanced_bass === "boolean"
   readonly property bool enhancedBass: connected && state.enhanced_bass === true
@@ -328,14 +333,14 @@ Panel {
   // clears spatial when bass turns on; mirror that locally so the tile agrees.
   function setEnhancedBass(on) {
     if (!root.claim(bassProc)) return
-    if (on) root.spatialFixed = false
+    if (on && root.bassExcludesSpatial) root.spatialFixed = false
     var lvl = root.bassLevel >= 1 && root.bassLevel <= 5 ? root.bassLevel : 3
     bassProc.start(root.cmd(["set", "enhanced-bass", on ? "true" : "false", String(lvl)]))
   }
 
   function setBassLevel(n) {
     if (n < 1 || n > 5 || !root.claim(bassProc)) return
-    root.spatialFixed = false
+    if (root.bassExcludesSpatial) root.spatialFixed = false
     bassProc.start(root.cmd(["set", "enhanced-bass", "true", String(n)]))
   }
 
@@ -672,7 +677,7 @@ Panel {
         else if (t === "l" || t === "L") root.setLatency(!root.lowLatency)
         else if (t === "i" || t === "I") root.setInEar(!root.inEar)
         else if ((t === "b" || t === "B") && root.hasEnhancedBass) root.setEnhancedBass(!root.enhancedBass)
-        else if ((t === "s" || t === "S") && root.hasSuperMic) root.setSpatial(!root.spatialFixed)
+        else if ((t === "s" || t === "S") && root.hasSpatial) root.setSpatial(!root.spatialFixed)
         else if ((t === "m" || t === "M") && root.hasSuperMic) root.setSuperMic(!root.superMic)
       }
 
@@ -1044,7 +1049,7 @@ Panel {
           }
 
           ToggleTile {
-            visible: root.hasSuperMic
+            visible: root.hasSpatial
             width: playbackGrid.cellWidth
             label: "Spatial"
             tip: "Fixed head-stage spatial audio"
@@ -1062,7 +1067,7 @@ Panel {
           }
         }
 
-        // Bass strength, only while bass is on. Four levels, matching the app.
+        // Bass strength, only while bass is on. Five levels, matching the app.
         Row {
           id: bassRow
           visible: root.connected && root.setupComplete && root.enhancedBass
