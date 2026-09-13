@@ -1121,12 +1121,12 @@ Panel {
               readonly property bool switching: root.pendingCodec === modelData
 
               width: codecRow.cellWidth
-              text: String(modelData).toUpperCase()
-              selected: root.shownCodec === modelData
-              // The A2DP link renegotiates for a few seconds; show it.
+              // The A2DP link renegotiates for a few seconds: the chip shows
+              // only a spinning icon until the new codec reads back.
+              text: switching ? "" : String(modelData).toUpperCase()
               iconText: switching ? "󰑓" : ""
               iconSpinning: switching
-              opacity: root.pendingCodec !== "" && !switching ? 0.45 : 1.0
+              selected: root.shownCodec === modelData
               bordered: true
               foreground: root.foreground
               accent: root.foreground
