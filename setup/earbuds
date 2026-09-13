@@ -273,7 +273,15 @@ codec_set() {
   [[ -n $want ]] || return 64
   prof=$(codec_map | $NB_AWK -F'\t' -v w="${want,,}" '$1 == w {print $2; exit}')
   [[ -n $prof ]] || { printf 'nothing-buds: codec %s not available\n' "$want" >&2; return 1; }
-  $NB_TIMEOUT --kill-after=2 10 "$NB_PACTL" set-card-profile "$NB_CARD" "$prof" >/dev/null 2>&1
+  $NB_TIMEOUT --kill-after=2 10 "$NB_PACTL" set-card-profile "$NB_CARD" "$prof" >/dev/null 2>&1 || return 1
+  # The A2DP link is renegotiated: the sink vanishes for 0.4 to 4s (measured
+  # on CMF Buds 2). Wait for it, bounded, so the echoed status is right.
+  local i
+  for (( i = 0; i < 60; i++ )); do
+    [[ -z $(codec_active) ]] || return 0
+    $NB_SLEEP 0.1
+  done
+  return 0
 }
 
 # `connected: false` is a normal state, not an error.

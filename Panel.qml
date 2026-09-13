@@ -612,7 +612,8 @@ Panel {
     onDone: function(code, out, err, ok) { Qt.callLater(root.refresh) }
   }
 
-  // The profile switch is immediate and the echoed status reflects it.
+  // The wrapper waits for the sink to return before echoing status, so the
+  // spinner runs for the real length of the switch.
   BoundedProcess {
     id: codecProc
     deadline: "20"
@@ -620,7 +621,7 @@ Panel {
       root.busy = false
       root.pendingCodec = ""
       if (ok) root.apply(out)
-      else Qt.callLater(root.refresh)
+      if (!ok || root.codec === "") Qt.callLater(root.refresh)
     }
   }
 
@@ -1117,9 +1118,15 @@ Panel {
             delegate: Button {
               required property var modelData
 
+              readonly property bool switching: root.pendingCodec === modelData
+
               width: codecRow.cellWidth
               text: String(modelData).toUpperCase()
               selected: root.shownCodec === modelData
+              // The A2DP link renegotiates for a few seconds; show it.
+              iconText: switching ? "󰑓" : ""
+              iconSpinning: switching
+              opacity: root.pendingCodec !== "" && !switching ? 0.45 : 1.0
               bordered: true
               foreground: root.foreground
               accent: root.foreground
