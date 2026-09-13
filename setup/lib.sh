@@ -26,6 +26,8 @@ NB_CONF_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/earbuds
 NB_WRAPPER=$NB_BIN_DIR/earbuds
 NB_UNIT=$NB_UNIT_DIR/earctl.service
 NB_EARCTL_BIN_FILE=$NB_STATE_DIR/earctl-bin
+# Commit the plugin built earctl from, so a pin move triggers a rebuild.
+NB_EARCTL_COMMIT_FILE=$NB_STATE_DIR/earctl-commit
 
 # Absolute paths. setup/earbuds carries its own copy of the subset it needs;
 # test.sh rewrites both.
