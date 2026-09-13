@@ -14,6 +14,12 @@ function level(anc) {
   return LEVELS[String(anc || "")] || { mode: "", strength: "", label: "Unknown" }
 }
 
+// Setter form back to the reported name, for showing a pending choice.
+function longOf(short) {
+  for (var k in LEVELS) if (k === short || LEVELS[k].strength === short) return k
+  return ""
+}
+
 function modeOf(anc)     { return level(anc).mode }
 function strengthOf(anc) { return level(anc).strength }
 function labelOf(anc)    { return level(anc).label }

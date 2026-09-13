@@ -96,10 +96,15 @@ Panel {
   // reading confirms or corrects it. Feedback lands on the click, not 1s later.
   property string pendingAnc: ""
   property string pendingCodec: ""
+  // -1 none, 0 off, 1 on
+  property int pendingLatency: -1
+  property int pendingInEar: -1
   readonly property string shownAnc: pendingAnc !== "" ? pendingAnc : anc
   readonly property string shownMode: Model.modeOf(shownAnc)
   readonly property string shownStrength: Model.strengthOf(shownAnc)
   readonly property string shownCodec: pendingCodec !== "" ? pendingCodec : codec
+  readonly property bool shownLatency: pendingLatency >= 0 ? pendingLatency === 1 : lowLatency
+  readonly property bool shownInEar: pendingInEar >= 0 ? pendingInEar === 1 : inEar
   property string lastError: ""
   // Find asks first: the tone is loud enough to hurt a bud still in an ear.
   property bool ringConfirmOpen: false
@@ -229,6 +234,8 @@ Panel {
       root.state = JSON.parse(text)
       root.pendingAnc = ""
       root.pendingCodec = ""
+      root.pendingLatency = -1
+      root.pendingInEar = -1
       root.lastError = ""
     } catch (e) {
       // Keep the previous reading rather than blanking the pill.
@@ -252,7 +259,7 @@ Panel {
   function setLevel(level) {
     if (root.busy || level === "") return
     root.busy = true
-    root.pendingAnc = level
+    root.pendingAnc = Model.longOf(level)
     setProc.start(root.cmd(["set", "anc", level]))
   }
 
@@ -295,12 +302,14 @@ Panel {
   function setLatency(on) {
     if (root.busy) return
     root.busy = true
+    root.pendingLatency = on ? 1 : 0
     latencyProc.start(root.cmd(["set", "latency", on ? "true" : "false"]))
   }
 
   function setInEar(on) {
     if (root.busy) return
     root.busy = true
+    root.pendingInEar = on ? 1 : 0
     inEarProc.start(root.cmd(["set", "in-ear", on ? "true" : "false"]))
   }
 
@@ -560,6 +569,7 @@ Panel {
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
+      root.pendingLatency = -1
       if (ok) root.apply(out)
     }
   }
@@ -569,6 +579,7 @@ Panel {
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
+      root.pendingInEar = -1
       if (ok) root.apply(out)
     }
   }
@@ -923,7 +934,7 @@ Panel {
         // evenly (ButtonGroup sizes each to its label).
         Row {
           id: strengthRow
-          visible: root.setupComplete && root.connected && root.mode === "anc"
+          visible: root.setupComplete && root.connected && root.shownMode === "anc"
           width: parent.width
           spacing: Style.space(6)
 
@@ -1009,16 +1020,18 @@ Panel {
             width: playbackGrid.cellWidth
             label: "Low lag"
             tip: "Lower audio delay for games"
-            checked: root.lowLatency
-            onToggled: root.setLatency(!root.lowLatency)
+            checked: root.shownLatency
+            pending: root.pendingLatency >= 0
+            onToggled: root.setLatency(!root.shownLatency)
           }
 
           ToggleTile {
             width: playbackGrid.cellWidth
             label: "In-ear"
             tip: "Pause when a bud is removed"
-            checked: root.inEar
-            onToggled: root.setInEar(!root.inEar)
+            checked: root.shownInEar
+            pending: root.pendingInEar >= 0
+            onToggled: root.setInEar(!root.shownInEar)
           }
 
           ToggleTile {
@@ -1162,6 +1175,7 @@ Panel {
     property string label: ""
     property string tip: ""
     property bool checked: false
+    property bool pending: false
     signal toggled()
 
     readonly property bool hot: tileMouse.containsMouse
@@ -1195,6 +1209,8 @@ Panel {
         id: tileSwitch
         anchors.verticalCenter: parent.verticalCenter
         checked: tile.checked
+        opacity: tile.pending ? 0.55 : 1.0
+        Behavior on opacity { NumberAnimation { duration: 120 } }
         interactive: false
         foreground: root.foreground
         accent: root.foreground
