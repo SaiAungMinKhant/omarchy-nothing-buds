@@ -1123,8 +1123,15 @@ Panel {
               width: codecRow.cellWidth
               // The A2DP link renegotiates for a few seconds: the chip shows
               // only a spinning icon until the new codec reads back.
+              // Icon only while switching, centred by the button itself. The
+              // height is held at the chip's resting height so the row
+              // does not move.
+              property real restingHeight: 0
+              onImplicitHeightChanged: if (!switching) restingHeight = implicitHeight
+              height: switching && restingHeight > 0 ? restingHeight : implicitHeight
               text: switching ? "" : String(modelData).toUpperCase()
               iconText: switching ? "󰑓" : ""
+              iconSize: fontSize
               iconSpinning: switching
               selected: root.shownCodec === modelData
               bordered: true
