@@ -92,8 +92,8 @@ Panel {
   property bool bootstrapping: false
 
   property bool busy: false
-  // What the user just asked for, shown as selected (dimmed) until the next
-  // reading confirms or corrects it. Feedback lands on the click, not 1s later.
+  // What the user just asked for, shown as applied until the next reading
+  // confirms or corrects it. Feedback lands on the click, not 1s later.
   property string pendingAnc: ""
   property string pendingCodec: ""
   // -1 none, 0 off, 1 on
@@ -950,7 +950,6 @@ Panel {
               width: strengthRow.cellWidth
               text: modelData.label
               selected: root.shownStrength === modelData.value
-              opacity: selected && root.pendingAnc !== "" ? 0.55 : 1.0
               bordered: true
               foreground: root.foreground
               accent: root.foreground
@@ -1021,7 +1020,6 @@ Panel {
             label: "Low lag"
             tip: "Lower audio delay for games"
             checked: root.shownLatency
-            pending: root.pendingLatency >= 0
             onToggled: root.setLatency(!root.shownLatency)
           }
 
@@ -1030,7 +1028,6 @@ Panel {
             label: "In-ear"
             tip: "Pause when a bud is removed"
             checked: root.shownInEar
-            pending: root.pendingInEar >= 0
             onToggled: root.setInEar(!root.shownInEar)
           }
 
@@ -1121,7 +1118,6 @@ Panel {
               width: codecRow.cellWidth
               text: String(modelData).toUpperCase()
               selected: root.shownCodec === modelData
-              opacity: selected && root.pendingCodec !== "" ? 0.55 : 1.0
               bordered: true
               foreground: root.foreground
               accent: root.foreground
@@ -1175,7 +1171,6 @@ Panel {
     property string label: ""
     property string tip: ""
     property bool checked: false
-    property bool pending: false
     signal toggled()
 
     readonly property bool hot: tileMouse.containsMouse
@@ -1209,8 +1204,6 @@ Panel {
         id: tileSwitch
         anchors.verticalCenter: parent.verticalCenter
         checked: tile.checked
-        opacity: tile.pending ? 0.55 : 1.0
-        Behavior on opacity { NumberAnimation { duration: 120 } }
         interactive: false
         foreground: root.foreground
         accent: root.foreground
@@ -1243,7 +1236,6 @@ Panel {
       : (value === "off" ? "prohibit" : "ear-slash")
 
     readonly property bool selected: root.shownMode === value
-    readonly property bool pending: selected && root.pendingAnc !== ""
     readonly property real diameter: Style.space(44)
 
     implicitHeight: modeColumn.implicitHeight
@@ -1261,10 +1253,8 @@ Panel {
         color: modeButton.selected
           ? root.foreground
           : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
-        opacity: modeButton.pending ? 0.55 : 1.0
 
         Behavior on color { ColorAnimation { duration: 180 } }
-        Behavior on opacity { NumberAnimation { duration: 120 } }
 
         PhosphorIcon {
           anchors.centerIn: parent
