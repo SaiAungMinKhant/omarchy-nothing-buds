@@ -859,6 +859,10 @@ if (( cost <= 60 )); then ok "full probe bounded (${cost}s)"; else bad "full pro
 echo 15 >"$FAKE/works-on-channel"
 wrap discover-channel >/dev/null 2>&1
 assert_exists "discovered channel before uninstall" "$STATE_CH"
+# The codec reads call the real pactl, which drops its cookie in
+# ~/.config/pulse. That file is not ours and uninstall rightly leaves the
+# directory holding it, so clear it to keep the exit code meaningful.
+/usr/bin/rm -rf -- "$H/.config/pulse"
 log_reset
 run_uninstall --yes
 assert_rc "uninstall after discovery" 0 "$?"
