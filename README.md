@@ -21,8 +21,9 @@ The panel follows your Omarchy theme; both shots are the same build.
   still in an ear. The tone stops itself after 8 seconds.
 
 Developed against CMF Buds 2 (B179). Other Nothing and CMF models speak the
-same protocol, but I have only tested that one. If the panel never connects,
-check the [RFCOMM channel](#rfcomm-channel) first.
+same protocol on a different RFCOMM channel. The panel probes for the right
+one when the buds stay silent, and that is how Nothing Ear (3) works with it.
+See [RFCOMM channel](#rfcomm-channel).
 
 ## Requirements
 
@@ -139,9 +140,11 @@ The wrapper resolves your earbuds' address in this order: `--address`, then
 `~/.config/earbuds/address`, then the first paired device whose name looks
 like a Nothing or CMF product. `install.sh` writes the config file for you.
 The RFCOMM channel resolves the same way (`--channel`, then
-`~/.config/earbuds/channel`, else 16). Values are validated — an address must
-match `AA:BB:CC:DD:EE:FF`, a channel must be 1–63 — and anything that fails is
-ignored with a note rather than passed to a command.
+`~/.config/earbuds/channel`, then the one discovery found in
+`~/.local/state/io.github.saiaungminkhant.nothing-buds/channel`, else 16).
+Values are validated. An address must match `AA:BB:CC:DD:EE:FF` and a
+channel must be 1 to 63. Anything that fails is ignored with a note rather
+than passed to a command.
 
 To pin per-widget instead, add keys to this widget's entry in
 `~/.config/omarchy/shell.json`:
@@ -159,22 +162,36 @@ steering mechanism this plugin no longer has.
 ### RFCOMM channel
 
 earctl finds the channel with `sdptool`. Arch no longer ships it, and it now
-lives in AUR `bluez-utils-compat`, so the wrapper pins 16 instead. That is the
-right channel for CMF Buds 2.
+lives in AUR `bluez-utils-compat`, so the wrapper defaults to 16 instead.
+Other models listen elsewhere:
 
-Other models differ. Probe for the channel that *answers*, not the ones that
-merely accept a connection:
+| Model | RFCOMM channel | Confirmed by |
+|---|---|---|
+| CMF Buds 2 (B179) | 16 | me |
+| Nothing Ear (3) (B173) | 15 | [@kasemeyer](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/issues/2) |
+
+A wrong channel does not fail loudly. The link opens and the buds never
+answer. When the panel sees that twice in a row on a live link, it runs
+`earbuds discover-channel`, which tries the known channels first and then 1
+to 30, and accepts only a channel that returns a battery reading. Accepting
+the link is not proof. On my CMF Buds 2 five channels opened and four of them
+stayed quiet. The panel shows which channel it is trying, then "Found your
+earbuds on channel N". The answer is remembered in
+`~/.local/state/io.github.saiaungminkhant.nothing-buds/channel`, which the
+wrapper reads after `~/.config/earbuds/channel` and uninstall removes.
+
+Discovery runs once per link and never when a channel is pinned in
+`shell.json` or `~/.config/earbuds/channel`. A pinned channel that stays
+silent is reported instead. Every probe has a deadline, 5s to disconnect, 8s
+to connect and 8s to read, so a device that answers nowhere costs about ten
+minutes and a known model a few seconds. You can run it by hand too:
 
 ```sh
-for ch in $(seq 1 30); do
-  earctl disconnect >/dev/null 2>&1
-  earctl auto-connect --bluetooth-address "$ADDR" --channel "$ch" >/dev/null 2>&1 \
-    && earctl battery >/dev/null 2>&1 && echo "channel $ch works"
-done
+earbuds discover-channel
 ```
 
-On my buds five channels opened and four of them went quiet. Only one returned
-a battery reading.
+If your model is not in the table and discovery found it, please open an
+issue with the model and channel.
 
 ## What is not here
 
@@ -197,7 +214,7 @@ The marketplace review requirements are addressed here:
 | Dependency installation must use the reviewed source | Missing earctl is built only from the full commit above, with detached checkout and HEAD verification before Cargo runs. `--locked` requires the committed dependency lockfile. There is no AUR installation path. S5, S5c |
 | Setup must be an explicit, consented action; no overwriting objects the plugin cannot prove it owns | Setup runs only from the panel's "Set up" click (`--yes`) or a y/N prompt in a terminal. `setup/lib.sh` installs through `nb_install_file`: symlinked targets are refused, pre-existing files are refused unless recorded in the manifest or byte-identical to a version shipped here, replaced files are backed up, and everything is published by atomic rename. The panel only ever probes with `install.sh --check`, which is read-only. `bash setup/test.sh` S1, S6, S7, S9, S15, S16 |
 | Uninstall must remove only what this installation created | A manifest at `~/.local/state/io.github.saiaungminkhant.nothing-buds/` records every file, directory and package created. Removal is hash-checked, symlink-checked, empty-dir-only, and never recurses by inference. Legacy installs get content-matching only. S3, S8, S11, S12 |
-| Helper calls need deadlines and output caps; a hung or noisy helper must not wedge the panel | Every wrapper call is wrapped in `/usr/bin/timeout` with byte caps on consumed output, and each helper runs in its own process group so a forked grandchild dies with it; the panel wraps every operation in `/usr/bin/timeout --kill-after=5 <deadline>`, streams stdout/stderr through capped parsers, and a watchdog plus supersession rules guarantee `busy`/link state always clears. S13 |
+| Helper calls need deadlines and output caps; a hung or noisy helper must not wedge the panel | Every wrapper call is wrapped in `/usr/bin/timeout` with byte caps on consumed output, and each helper runs in its own process group so a forked grandchild dies with it; the panel wraps every operation in `/usr/bin/timeout --kill-after=5 <deadline>`, streams stdout/stderr through capped parsers, and a watchdog plus supersession rules guarantee `busy`/link state always clears. Channel discovery is a fixed list of bounded probes, writes only inside the plugin's own state directory by temp file and rename, and refuses a symlink there. S13, S17 |
 | Executable identity and input boundaries must not be steerable | All binaries are invoked by absolute path; the `EARCTL`/`EARBUDS_ADDR`/`EARBUDS_CHANNEL` overrides are removed; the panel passes overrides as validated arguments; config files are read bounded, without following symlinks, and validated against a Bluetooth-address grammar before use. S14 |
 
 `setup/test.sh` runs all of this against fakes in a throwaway HOME — no root,

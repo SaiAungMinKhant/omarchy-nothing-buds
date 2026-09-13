@@ -73,6 +73,9 @@ if [[ $manifest_mode == true ]]; then
       dir$'\t'*)     note "  directory $shown (only if empty)" ;;
     esac
   done <"$NB_MANIFEST"
+  if [[ -e $NB_STATE_DIR/channel || -L $NB_STATE_DIR/channel ]]; then
+    note "  $NB_STATE_DIR/channel (discovered RFCOMM channel)"
+  fi
   if $keep_earctl; then
     note "  earctl is kept (--keep-earctl)"
   fi
@@ -214,6 +217,13 @@ if [[ $manifest_mode == true ]]; then
   case $? in
     1|2|6) partial=1 ;;
   esac
+  # The wrapper's discovered channel. Ours by location, not hashed.
+  if [[ -L $NB_STATE_DIR/channel ]]; then
+    nb_err "leaving $NB_STATE_DIR/channel: it is a symlink"
+    partial=1
+  elif [[ -f $NB_STATE_DIR/channel ]]; then
+    $NB_RM -f -- "$NB_STATE_DIR/channel" 2>/dev/null || partial=1
+  fi
 
   owned_dirs=()
   while IFS= read -r d; do
