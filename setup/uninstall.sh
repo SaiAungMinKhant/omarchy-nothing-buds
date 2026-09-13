@@ -217,7 +217,7 @@ if [[ $manifest_mode == true ]]; then
   case $? in
     1|2|6) partial=1 ;;
   esac
-  # The wrapper's discovered channel: ours by location, not hashed.
+  # The wrapper's discovered channel. Ours by location, not hashed.
   if [[ -L $NB_STATE_DIR/channel ]]; then
     nb_err "leaving $NB_STATE_DIR/channel: it is a symlink"
     partial=1

@@ -20,8 +20,8 @@ The panel follows your Omarchy theme; both shots are the same build.
 - Find my buds. The tone stops itself after 8 seconds.
 
 Developed against CMF Buds 2 (B179). Other Nothing and CMF models speak the
-same protocol on a different RFCOMM channel; the panel probes for the right
-one when the buds stay silent. Nothing Ear (3) is confirmed working that way.
+same protocol on a different RFCOMM channel. The panel probes for the right
+one when the buds stay silent, and that is how Nothing Ear (3) works with it.
 See [RFCOMM channel](#rfcomm-channel).
 
 ## Requirements
@@ -141,9 +141,9 @@ like a Nothing or CMF product. `install.sh` writes the config file for you.
 The RFCOMM channel resolves the same way (`--channel`, then
 `~/.config/earbuds/channel`, then the one discovery found in
 `~/.local/state/io.github.saiaungminkhant.nothing-buds/channel`, else 16).
-Values are validated — an address must match `AA:BB:CC:DD:EE:FF`, a channel
-must be 1–63 — and anything that fails is ignored with a note rather than
-passed to a command.
+Values are validated. An address must match `AA:BB:CC:DD:EE:FF` and a
+channel must be 1 to 63. Anything that fails is ignored with a note rather
+than passed to a command.
 
 To pin per-widget instead, add keys to this widget's entry in
 `~/.config/omarchy/shell.json`:
@@ -169,22 +169,21 @@ Other models listen elsewhere:
 | CMF Buds 2 (B179) | 16 | me |
 | Nothing Ear (3) (B173) | 15 | [@kasemeyer](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/issues/2) |
 
-A wrong channel does not fail loudly: the link opens and the buds never
+A wrong channel does not fail loudly. The link opens and the buds never
 answer. When the panel sees that twice in a row on a live link, it runs
 `earbuds discover-channel`, which tries the known channels first and then 1
-to 30, and accepts only a channel that returns a battery reading. Several
-channels open and stay quiet; on CMF Buds 2, four out of five did. The panel
-shows which channel it is trying, then "Found your earbuds on channel N". The
-answer is remembered in
+to 30, and accepts only a channel that returns a battery reading. Accepting
+the link is not proof. On my CMF Buds 2 five channels opened and four of them
+stayed quiet. The panel shows which channel it is trying, then "Found your
+earbuds on channel N". The answer is remembered in
 `~/.local/state/io.github.saiaungminkhant.nothing-buds/channel`, which the
 wrapper reads after `~/.config/earbuds/channel` and uninstall removes.
 
 Discovery runs once per link and never when a channel is pinned in
-`shell.json` or `~/.config/earbuds/channel`; a pinned channel that stays
-silent is reported instead. Every probe is bounded (5s disconnect, 8s
-connect, 8s read), so the worst case is about ten minutes for a device that
-answers nowhere, and a few seconds for a known model. You can run it by hand
-too:
+`shell.json` or `~/.config/earbuds/channel`. A pinned channel that stays
+silent is reported instead. Every probe has a deadline, 5s to disconnect, 8s
+to connect and 8s to read, so a device that answers nowhere costs about ten
+minutes and a known model a few seconds. You can run it by hand too:
 
 ```sh
 earbuds discover-channel

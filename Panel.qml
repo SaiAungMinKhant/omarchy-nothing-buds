@@ -178,9 +178,9 @@ Panel {
 
   // ------------------------------------------------------ channel discovery
   // A link that is up but never answers usually means the wrong RFCOMM
-  // channel (CMF Buds 2: 16, Nothing Ear (3): 15). After two silent status
-  // reads in a row the wrapper probes for one that answers, once per link,
-  // unless shell.json pins a channel. The probe holds the only RFCOMM
+  // channel. CMF Buds 2 use 16, Nothing Ear (3) uses 15. After two silent
+  // status reads in a row the wrapper probes for one that answers, once per
+  // link, unless shell.json pins a channel. The probe holds the only RFCOMM
   // session, so status polling pauses while it runs.
   property int silentReads: 0
   property bool discovering: false
@@ -319,7 +319,7 @@ Panel {
   Component.onDestruction: root.stopAll()
 
   // BlueZ said so; ask the wrapper for details now rather than next poll.
-  // A new link gets a fresh chance at discovery; a lost one ends a running probe.
+  // A new link gets a fresh chance at discovery. A lost one ends a running probe.
   onLinkUpChanged: {
     root.silentReads = 0
     root.discoveredThisLink = false
@@ -490,7 +490,7 @@ Panel {
     }
   }
 
-  // Probes up to 30 channels at up to 21s each; known models answer in seconds.
+  // Up to 30 channels at up to 21s each. Known models answer in seconds.
   BoundedProcess {
     id: discoverProc
     deadline: "660"
