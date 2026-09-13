@@ -92,6 +92,21 @@ Panel {
   property bool bootstrapping: false
 
   property bool busy: false
+  // What the user just asked for. Shown as applied until the next reading
+  // confirms or corrects it, so the click itself is the feedback.
+  property string pendingAnc: ""
+  property string pendingCodec: ""
+  // -1 none, 0 off, 1 on
+  property int pendingLatency: -1
+  property int pendingInEar: -1
+  property int pendingBassLevel: 0
+  readonly property string shownAnc: pendingAnc !== "" ? pendingAnc : anc
+  readonly property string shownMode: Model.modeOf(shownAnc)
+  readonly property string shownStrength: Model.strengthOf(shownAnc)
+  readonly property string shownCodec: pendingCodec !== "" ? pendingCodec : codec
+  readonly property bool shownLatency: pendingLatency >= 0 ? pendingLatency === 1 : lowLatency
+  readonly property bool shownInEar: pendingInEar >= 0 ? pendingInEar === 1 : inEar
+  readonly property int shownBassLevel: pendingBassLevel > 0 ? pendingBassLevel : bassLevel
   property string lastError: ""
   // Find asks first: the tone is loud enough to hurt a bud still in an ear.
   property bool ringConfirmOpen: false
@@ -181,6 +196,28 @@ Panel {
   readonly property bool lowLatency: connected && state.low_latency === true
   readonly property bool inEar: connected && state.in_ear === true
 
+  // Ear (3)-only features. The wrapper reports null on models that don't
+  // support them, so `has*` gates whether the control appears at all.
+  readonly property bool hasSuperMic: connected && typeof state.super_mic === "boolean"
+  // Spatial audio has no getter, so support comes from the model earctl
+  // resolved. Ear (3) takes it and there it excludes bass.
+  readonly property string modelBase: connected && state.model_base ? String(state.model_base) : ""
+  readonly property bool hasSpatial: modelBase === "B173"
+  readonly property bool bassExcludesSpatial: modelBase === "B173"
+  readonly property bool superMic: connected && state.super_mic === true
+  readonly property bool hasEnhancedBass: connected && typeof state.enhanced_bass === "boolean"
+  readonly property bool enhancedBass: connected && state.enhanced_bass === true
+  readonly property int bassLevel: connected && typeof state.bass_level === "number" ? state.bass_level : 0
+  // Five levels, confirmed from the app: device byte = level * 2 (2..10).
+  readonly property var bassLevels: [1, 2, 3, 4, 5]
+  // Spatial audio is set-only (the buds expose no getter), so its state is
+  // local intent, not a reading. It can drift if changed from the phone.
+  property bool spatialFixed: false
+
+  // A2DP codec is a host/PipeWire setting, reported by the wrapper via pactl.
+  readonly property string codec: connected && state.codec ? String(state.codec) : ""
+  readonly property var codecs: connected && state.codecs ? state.codecs : []
+
   // Theme bindings as in every first-party panel; 1.55 is the shared "inactive" dim.
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -202,6 +239,11 @@ Panel {
     if (!text) return
     try {
       root.state = JSON.parse(text)
+      root.pendingAnc = ""
+      root.pendingCodec = ""
+      root.pendingLatency = -1
+      root.pendingInEar = -1
+      root.pendingBassLevel = 0
       root.lastError = ""
     } catch (e) {
       // Keep the previous reading rather than blanking the pill.
@@ -217,14 +259,23 @@ Panel {
 
   // Keep the ANC strength when switching modes.
   function setMode(next) {
-    if (next === "anc") setLevel(root.strength !== "" ? root.strength : "nc-high")
+    if (next === "anc") setLevel(root.shownStrength !== "" ? root.shownStrength : "nc-high")
     else if (next === "trans") setLevel("transparency")
     else setLevel("off")
   }
 
+  // A click beats a status poll, which is abandoned, and an earlier click
+  // of the same kind, which start() supersedes. A different set still in
+  // flight refuses, so two writes never race on the one RFCOMM session.
+  function claim(proc) {
+    if (!root.busy) { root.busy = true; return true }
+    if (statusProc.live) { statusProc.stop(); return true }
+    return proc.live
+  }
+
   function setLevel(level) {
-    if (root.busy || level === "") return
-    root.busy = true
+    if (level === "" || !root.claim(setProc)) return
+    root.pendingAnc = Model.longOf(level)
     setProc.start(root.cmd(["set", "anc", level]))
   }
 
@@ -265,20 +316,56 @@ Panel {
   }
 
   function setLatency(on) {
-    if (root.busy) return
-    root.busy = true
+    if (!root.claim(latencyProc)) return
+    root.pendingLatency = on ? 1 : 0
     latencyProc.start(root.cmd(["set", "latency", on ? "true" : "false"]))
   }
 
   function setInEar(on) {
-    if (root.busy) return
-    root.busy = true
+    if (!root.claim(inEarProc)) return
+    root.pendingInEar = on ? 1 : 0
     inEarProc.start(root.cmd(["set", "in-ear", on ? "true" : "false"]))
+  }
+
+  function setSuperMic(on) {
+    if (!root.claim(superMicProc)) return
+    superMicProc.start(root.cmd(["set", "super-mic", on ? "true" : "false"]))
+  }
+
+  // Enabling bass keeps the current level (or 2 the first time). The wrapper
+  // clears spatial when bass turns on; mirror that locally so the tile agrees.
+  function setEnhancedBass(on) {
+    if (!root.claim(bassProc)) return
+    if (on && root.bassExcludesSpatial) root.spatialFixed = false
+    var lvl = root.bassLevel >= 1 && root.bassLevel <= 5 ? root.bassLevel : 3
+    bassProc.start(root.cmd(["set", "enhanced-bass", on ? "true" : "false", String(lvl)]))
+  }
+
+  function setBassLevel(n) {
+    if (n < 1 || n > 5 || !root.claim(bassProc)) return
+    root.pendingBassLevel = n
+    if (root.bassExcludesSpatial) root.spatialFixed = false
+    bassProc.start(root.cmd(["set", "enhanced-bass", "true", String(n)]))
+  }
+
+  // Set-only: reflect the intent locally, since status carries no spatial
+  // field. Enabling spatial clears bass on the device (mutual exclusivity).
+  function setSpatial(fixed) {
+    if (!root.claim(spatialProc)) return
+    root.spatialFixed = fixed
+    spatialProc.start(root.cmd(["set", "spatial", fixed ? "fixed" : "off"]))
+  }
+
+  function setCodec(name) {
+    if (name === "" || name === root.shownCodec || !root.claim(codecProc)) return
+    root.pendingCodec = String(name)
+    codecProc.start(root.cmd(["set", "codec", String(name)]))
   }
 
   function stopAll() {
     var ps = [probeProc, earctlProc, bootstrapProc, statusProc, setProc,
-              ringProc, unringProc, linkProc, latencyProc, inEarProc]
+              ringProc, unringProc, linkProc, latencyProc, inEarProc,
+              superMicProc, bassProc, spatialProc, codecProc]
     for (var i = 0; i < ps.length; i++) ps[i].stop()
   }
 
@@ -444,14 +531,16 @@ Panel {
     }
   }
 
-  // Re-read so the panel shows the level the buds actually took.
+  // The wrapper echoes a fresh status after the set, so no second read.
   BoundedProcess {
     id: setProc
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
-      if (!ok && code === 124) root.lastError = "The earbuds command timed out."
-      Qt.callLater(root.refresh)
+      root.pendingAnc = ""
+      if (ok) root.apply(out)
+      else if (code === 124) root.lastError = "The earbuds command timed out."
+      else Qt.callLater(root.refresh)
     }
   }
 
@@ -492,6 +581,7 @@ Panel {
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
+      root.pendingLatency = -1
       if (ok) root.apply(out)
     }
   }
@@ -501,7 +591,52 @@ Panel {
     deadline: "20"
     onDone: function(code, out, err, ok) {
       root.busy = false
+      root.pendingInEar = -1
       if (ok) root.apply(out)
+    }
+  }
+
+  BoundedProcess {
+    id: superMicProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
+    }
+  }
+
+  BoundedProcess {
+    id: bassProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      root.pendingBassLevel = 0
+      if (ok) root.apply(out)
+    }
+  }
+
+  // Spatial has no read-back of its own, but enabling it clears bass on the
+  // device, so re-read to update the bass tile.
+  BoundedProcess {
+    id: spatialProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      if (ok) root.apply(out)
+      else Qt.callLater(root.refresh)
+    }
+  }
+
+  // The wrapper waits for the sink to come back before it echoes status,
+  // so the spinner runs for as long as the switch really takes.
+  BoundedProcess {
+    id: codecProc
+    deadline: "20"
+    onDone: function(code, out, err, ok) {
+      root.busy = false
+      root.pendingCodec = ""
+      if (ok) root.apply(out)
+      if (!ok || root.codec === "") Qt.callLater(root.refresh)
     }
   }
 
@@ -521,7 +656,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(320))
+    contentWidth: panel.fittedContentWidth(Style.space(380))
     // 520 clipped the action buttons.
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
 
@@ -551,6 +686,9 @@ Panel {
         else if (t === "0") root.setLink(!root.connected)
         else if (t === "l" || t === "L") root.setLatency(!root.lowLatency)
         else if (t === "i" || t === "I") root.setInEar(!root.inEar)
+        else if ((t === "b" || t === "B") && root.hasEnhancedBass) root.setEnhancedBass(!root.enhancedBass)
+        else if ((t === "s" || t === "S") && root.hasSpatial) root.setSpatial(!root.spatialFixed)
+        else if ((t === "m" || t === "M") && root.hasSuperMic) root.setSuperMic(!root.superMic)
       }
 
       // Sits over the whole card; the scrim swallows clicks and the key
@@ -571,366 +709,627 @@ Panel {
         onConfirmed: root.ring()
       }
 
-      Column {
-        id: column
-        anchors.left: parent.left
-        anchors.right: parent.right
-        spacing: Style.space(12)
+      // The card is capped; anything past it scrolls, as in the dropbox panel.
+      Flickable {
+        id: panelFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-        PanelHero {
-          width: parent.width
-          title: root.deviceName
-          // "Disconnected" would be a lie before setup.
-          meta: !root.setupComplete ? "Setup required"
-              : (root.paired ? Model.summary(root.state) : "No earbuds paired")
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          iconOpacity: root.connected ? 1.0 : 0.5
-          iconComponent: Component {
-            PhosphorIcon {
-              iconSize: Style.space(34)
-              icon: "headphones"
-              color: root.foreground
-              // The meta line already spells the mode out.
-              opacity: root.connected ? 1.0 : 0.5
+        Column {
+          id: column
+          width: panelFlick.width
+          spacing: Style.space(12)
+
+          PanelHero {
+            width: parent.width
+            title: root.deviceName
+            // "Disconnected" would be a lie before setup.
+            meta: !root.setupComplete ? "Setup required"
+                : (root.paired ? Model.summary(root.state) : "No earbuds paired")
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            iconOpacity: root.connected ? 1.0 : 0.5
+            iconComponent: Component {
+              PhosphorIcon {
+                iconSize: Style.space(34)
+                icon: "headphones"
+                color: root.foreground
+                // The meta line already spells the mode out.
+                opacity: root.connected ? 1.0 : 0.5
+              }
             }
-          }
 
-          // Connect/disconnect switch in the hero's trailing slot.
-          trailingControl: Component {
-            ToggleSwitch {
-              id: powerSwitch
+            // Connect/disconnect switch in the hero's trailing slot.
+            trailingControl: Component {
+              ToggleSwitch {
+                id: powerSwitch
 
-              checked: root.connected
-              busy: root.linking
-              interactive: root.setupComplete && root.paired
-              foreground: root.foreground
-              accent: root.foreground
-              onToggled: root.setLink(!root.connected)
+                checked: root.connected
+                busy: root.linking
+                interactive: root.setupComplete && root.paired
+                foreground: root.foreground
+                accent: root.foreground
+                onToggled: root.setLink(!root.connected)
 
-              PanelToolTip {
-                visible: powerSwitch.containsMouse
-                text: root.connected ? "Disconnect earbuds" : "Connect earbuds"
-                fontFamily: root.fontFamily
+                PanelToolTip {
+                  visible: powerSwitch.containsMouse
+                  text: root.connected ? "Disconnect earbuds" : "Connect earbuds"
+                  fontFamily: root.fontFamily
+                }
               }
             }
           }
-        }
-
-        Text {
-          visible: root.lastError !== ""
-          width: parent.width
-          text: root.lastError
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
-
-        PanelSeparator { width: parent.width; foreground: root.foreground }
-
-        // Not set up, nothing clicked: explain and wait for the click.
-        Column {
-          visible: !root.setupComplete && !root.setupConsented && !root.bootstrapping
-          width: parent.width
-          spacing: Style.space(10)
 
           Text {
+            visible: root.lastError !== ""
             width: parent.width
-            text: "Setup installs a few things outside this plugin's folder:\n"
-                + "the earbuds command in ~/.local/bin, a systemd --user\n"
-                + "service that talks to the earbuds, and a small config in\n"
-                + "~/.config/earbuds. Nothing runs as root. If earctl is missing,\n"
-                + "setup offers a terminal to build it from pinned source.\n"
-                + "Git and a Rust toolchain are required for the build."
-            color: root.dim
+            text: root.lastError
+            color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
           }
 
-          Button {
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+
+          // Not set up, nothing clicked: explain and wait for the click.
+          Column {
+            visible: !root.setupComplete && !root.setupConsented && !root.bootstrapping
             width: parent.width
-            text: "Set up now"
-            iconText: "󰇚"
-            bordered: true
-            foreground: root.foreground
-            accent: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: {
-              root.setupConsented = true
-              root.bootstrap()
+            spacing: Style.space(10)
+
+            Text {
+              width: parent.width
+              text: "Setup installs a few things outside this plugin's folder:\n"
+                  + "the earbuds command in ~/.local/bin, a systemd --user\n"
+                  + "service that talks to the earbuds, and a small config in\n"
+                  + "~/.config/earbuds. Nothing runs as root. If earctl is missing,\n"
+                  + "setup offers a terminal to build it from pinned source.\n"
+                  + "Git and a Rust toolchain are required for the build."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
             }
-          }
-        }
 
-        // Setup was consented to and is somewhere in flight.
-        Column {
-          visible: !root.setupComplete && root.setupConsented
-          width: parent.width
-          spacing: Style.space(10)
-
-          Text {
-            visible: root.bootstrapping
-            width: parent.width
-            text: "Setting things up..."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
-            width: parent.width
-            text: "Everything is installed except earctl, which talks to "
-                + "the earbuds. Setup builds it from pinned source in a terminal. "
-                + "Git and a Rust toolchain are required; no password is needed."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Button {
-            visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
-            width: parent.width
-            text: "Install earctl"
-            iconText: "󰇚"
-            bordered: true
-            foreground: root.foreground
-            accent: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: root.installEarctl()
-          }
-
-          // earctl appeared on its own: one more explicit click finishes the job.
-          Text {
-            visible: !root.bootstrapping && root.lastError === ""
-              && (!root.needsEarctl || root.earctlPresent)
-            width: parent.width
-            text: "Almost there. Finish the setup that was agreed to:"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Button {
-            visible: !root.bootstrapping && (!root.needsEarctl || root.earctlPresent)
-            width: parent.width
-            text: root.lastError !== "" ? "Try setup again" : "Finish setup"
-            iconText: "󰇚"
-            bordered: true
-            foreground: root.foreground
-            accent: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: root.bootstrap()
-          }
-        }
-
-        Column {
-          visible: root.setupComplete && !root.paired
-          width: parent.width
-          spacing: Style.space(10)
-
-          Text {
-            width: parent.width
-            text: "No Nothing or CMF earbuds are paired yet. Pair them once "
-                + "and this panel takes over from there."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Button {
-            width: parent.width
-            text: "Open Bluetooth"
-            iconText: "󰂯"
-            bordered: true
-            foreground: root.foreground
-            accent: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: if (root.bar) root.bar.run("omarchy-shell shell toggle omarchy.bluetooth")
-          }
-        }
-
-        Column {
-          visible: root.setupComplete && root.paired && !root.connected
-          width: parent.width
-          spacing: Style.space(10)
-
-          Text {
-            width: parent.width
-            // Say Bluetooth explicitly; everything below needs the link.
-            text: root.linkUp
-                ? "Connected over Bluetooth. Waiting for the earbuds to answer."
-                : (root.linkFailed
-                    ? "The earbuds did not answer. Take them out of the case, "
-                      + "then try the switch again."
-                    : "Connect over Bluetooth first, with the switch above or "
-                      + "from the Bluetooth panel. Everything else needs that link.")
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Button {
-            visible: !root.linkUp
-            width: parent.width
-            text: "Open Bluetooth"
-            iconText: "󰂯"
-            bordered: true
-            foreground: root.foreground
-            accent: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: if (root.bar) root.bar.run("omarchy-shell shell toggle omarchy.bluetooth")
-          }
-        }
-
-        PanelSectionHeader {
-          visible: root.connected && root.setupComplete
-          text: "Noise Cancellation"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
-
-        Row {
-          id: modeRow
-          visible: root.connected && root.setupComplete
-          width: parent.width
-          spacing: Style.space(8)
-
-          readonly property real cellWidth: (width - spacing * 2) / 3
-
-          ModeButton { width: modeRow.cellWidth; value: "anc";   label: "Noise cancellation" }
-          ModeButton { width: modeRow.cellWidth; value: "trans"; label: "Transparency" }
-          ModeButton { width: modeRow.cellWidth; value: "off";   label: "Off" }
-        }
-
-        // Strength only exists inside ANC. Hand-rolled so the four chips flex
-        // evenly (ButtonGroup sizes each to its label).
-        Row {
-          id: strengthRow
-          visible: root.setupComplete && root.connected && root.mode === "anc"
-          width: parent.width
-          spacing: Style.space(6)
-
-          readonly property real cellWidth:
-            (width - spacing * (root.strengthOptions.length - 1)) / root.strengthOptions.length
-
-          Repeater {
-            model: root.strengthOptions
-
-            delegate: Button {
-              required property var modelData
-
-              width: strengthRow.cellWidth
-              text: modelData.label
-              selected: root.strength === modelData.value
+            Button {
+              width: parent.width
+              text: "Set up now"
+              iconText: "󰇚"
               bordered: true
               foreground: root.foreground
               accent: root.foreground
               fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              onClicked: root.setLevel(modelData.value)
+              onClicked: {
+                root.setupConsented = true
+                root.bootstrap()
+              }
             }
           }
-        }
 
-        PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
+          // Setup was consented to and is somewhere in flight.
+          Column {
+            visible: !root.setupComplete && root.setupConsented
+            width: parent.width
+            spacing: Style.space(10)
 
-        PanelSectionHeader {
-          visible: root.connected && root.setupComplete
-          text: "Battery"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
+            Text {
+              visible: root.bootstrapping
+              width: parent.width
+              text: "Setting things up..."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
 
-        // Tiles: the meter is readable at a glance.
-        Row {
-          id: batteryRow
-          visible: root.connected && root.setupComplete
-          width: parent.width
-          spacing: Style.space(8)
+            Text {
+              visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
+              width: parent.width
+              text: "Everything is installed except earctl, which talks to "
+                  + "the earbuds. Setup builds it from pinned source in a terminal. "
+                  + "Git and a Rust toolchain are required; no password is needed."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
 
-          // The case only reports while connected; a permanent "—" would read as broken.
-          readonly property bool hasCase: typeof root.state.case === "number"
-          readonly property int tiles: hasCase ? 3 : 2
-          readonly property real tileWidth:
-            (width - spacing * (tiles - 1)) / tiles
+            Button {
+              visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
+              width: parent.width
+              text: "Install earctl"
+              iconText: "󰇚"
+              bordered: true
+              foreground: root.foreground
+              accent: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.installEarctl()
+            }
 
-          BatteryTile { width: batteryRow.tileWidth; label: "LEFT";  value: root.state.left }
-          BatteryTile { width: batteryRow.tileWidth; label: "RIGHT"; value: root.state.right }
-          BatteryTile {
-            width: batteryRow.tileWidth
-            label: "CASE"
-            value: root.state.case
-            visible: batteryRow.hasCase
+            // earctl appeared on its own: one more explicit click finishes the job.
+            Text {
+              visible: !root.bootstrapping && root.lastError === ""
+                && (!root.needsEarctl || root.earctlPresent)
+              width: parent.width
+              text: "Almost there. Finish the setup that was agreed to:"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Button {
+              visible: !root.bootstrapping && (!root.needsEarctl || root.earctlPresent)
+              width: parent.width
+              text: root.lastError !== "" ? "Try setup again" : "Finish setup"
+              iconText: "󰇚"
+              bordered: true
+              foreground: root.foreground
+              accent: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.bootstrap()
+            }
+          }
+
+          Column {
+            visible: root.setupComplete && !root.paired
+            width: parent.width
+            spacing: Style.space(10)
+
+            Text {
+              width: parent.width
+              text: "No Nothing or CMF earbuds are paired yet. Pair them once "
+                  + "and this panel takes over from there."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Button {
+              width: parent.width
+              text: "Open Bluetooth"
+              iconText: "󰂯"
+              bordered: true
+              foreground: root.foreground
+              accent: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: if (root.bar) root.bar.run("omarchy-shell shell toggle omarchy.bluetooth")
+            }
+          }
+
+          Column {
+            visible: root.setupComplete && root.paired && !root.connected
+            width: parent.width
+            spacing: Style.space(10)
+
+            Text {
+              width: parent.width
+              // Say Bluetooth explicitly; everything below needs the link.
+              text: root.linkUp
+                  ? "Connected over Bluetooth. Waiting for the earbuds to answer."
+                  : (root.linkFailed
+                      ? "The earbuds did not answer. Take them out of the case, "
+                        + "then try the switch again."
+                      : "Connect over Bluetooth first, with the switch above or "
+                        + "from the Bluetooth panel. Everything else needs that link.")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Button {
+              visible: !root.linkUp
+              width: parent.width
+              text: "Open Bluetooth"
+              iconText: "󰂯"
+              bordered: true
+              foreground: root.foreground
+              accent: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: if (root.bar) root.bar.run("omarchy-shell shell toggle omarchy.bluetooth")
+            }
+          }
+
+          PanelSectionHeader {
+            visible: root.connected && root.setupComplete
+            text: "Noise Cancellation"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Row {
+            id: modeRow
+            visible: root.connected && root.setupComplete
+            width: parent.width
+            spacing: Style.space(8)
+
+            readonly property real cellWidth: (width - spacing * 2) / 3
+
+            ModeButton { width: modeRow.cellWidth; value: "anc";   label: "Noise cancellation" }
+            ModeButton { width: modeRow.cellWidth; value: "trans"; label: "Transparency" }
+            ModeButton { width: modeRow.cellWidth; value: "off";   label: "Off" }
+          }
+
+          // Strength only exists inside ANC. Hand-rolled so the four chips flex
+          // evenly (ButtonGroup sizes each to its label).
+          Row {
+            id: strengthRow
+            visible: root.setupComplete && root.connected && root.shownMode === "anc"
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property real cellWidth:
+              (width - spacing * (root.strengthOptions.length - 1)) / root.strengthOptions.length
+
+            Repeater {
+              model: root.strengthOptions
+
+              delegate: Button {
+                required property var modelData
+
+                width: strengthRow.cellWidth
+                text: modelData.label
+                selected: root.shownStrength === modelData.value
+                bordered: true
+                foreground: root.foreground
+                accent: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                onClicked: root.setLevel(modelData.value)
+              }
+            }
+          }
+
+          PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
+
+          PanelSectionHeader {
+            visible: root.connected && root.setupComplete
+            text: "Battery"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          // Tiles: the meter is readable at a glance.
+          Row {
+            id: batteryRow
+            visible: root.connected && root.setupComplete
+            width: parent.width
+            spacing: Style.space(8)
+
+            // The case only reports while connected; a permanent "—" would read as broken.
+            readonly property bool hasCase: typeof root.state.case === "number"
+            readonly property int tiles: hasCase ? 3 : 2
+            readonly property real tileWidth:
+              (width - spacing * (tiles - 1)) / tiles
+
+            BatteryTile { width: batteryRow.tileWidth; label: "LEFT";  value: root.state.left }
+            BatteryTile { width: batteryRow.tileWidth; label: "RIGHT"; value: root.state.right }
+            BatteryTile {
+              width: batteryRow.tileWidth
+              label: "CASE"
+              value: root.state.case
+              visible: batteryRow.hasCase
+            }
+          }
+
+          PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
+
+          PanelSectionHeader {
+            visible: root.connected && root.setupComplete
+            text: "Playback"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Grid {
+            id: playbackGrid
+            visible: root.connected && root.setupComplete
+            width: parent.width
+            columns: 2
+            columnSpacing: Style.space(8)
+            rowSpacing: Style.space(8)
+
+            readonly property real cellWidth: (width - columnSpacing) / 2
+
+            ToggleTile {
+              width: playbackGrid.cellWidth
+              label: "Low lag"
+              tip: "Lower audio delay for games"
+              checked: root.shownLatency
+              onToggled: root.setLatency(!root.shownLatency)
+            }
+
+            ToggleTile {
+              width: playbackGrid.cellWidth
+              label: "In-ear"
+              tip: "Pause when a bud is removed"
+              checked: root.shownInEar
+              onToggled: root.setInEar(!root.shownInEar)
+            }
+
+            ToggleTile {
+              visible: root.hasSuperMic
+              width: playbackGrid.cellWidth
+              label: "Super Mic"
+              tip: "Case Talk-button mic for calls"
+              checked: root.superMic
+              onToggled: root.setSuperMic(!root.superMic)
+            }
+          }
+
+          // Laid out as in Nothing X: two round choices, Fixed and Off.
+          PanelSectionHeader {
+            visible: root.connected && root.setupComplete && root.hasSpatial
+            text: "Spatial audio"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Row {
+            visible: root.connected && root.setupComplete && root.hasSpatial
+            width: parent.width
+            readonly property real cellWidth: (width - spacing) / 2
+            spacing: Style.space(8)
+
+            ChoiceButton {
+              width: parent.cellWidth
+              label: "Fixed"
+              iconName: "circle-dashed"
+              selected: root.spatialFixed
+              onChosen: root.setSpatial(true)
+            }
+
+            ChoiceButton {
+              width: parent.cellWidth
+              label: "Off"
+              iconName: "prohibit"
+              selected: !root.spatialFixed
+              onChosen: root.setSpatial(false)
+            }
+          }
+
+          // Ultra bass as in Nothing X: a switch, and a five-step slider while on.
+          Toggle {
+            visible: root.connected && root.setupComplete && root.hasEnhancedBass
+            width: parent.width
+            label: "Ultra bass"
+            description: root.enhancedBass ? "Level " + root.shownBassLevel : "Off"
+            checked: root.enhancedBass
+            foreground: root.foreground
+            accent: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.setEnhancedBass(!root.enhancedBass)
+          }
+
+          Item {
+            visible: root.connected && root.setupComplete && root.hasEnhancedBass && root.enhancedBass
+            width: parent.width
+            height: Style.space(34)
+
+            PanelSlider {
+              bar: root.bar
+              anchors.fill: parent
+              anchors.leftMargin: Style.space(6)
+              anchors.rightMargin: Style.space(6)
+              minimum: 1
+              maximum: 5
+              step: 1
+              integer: true
+              tickCount: 5
+              value: root.shownBassLevel
+              onReleased: function(v) { root.setBassLevel(Math.round(v)) }
+            }
+          }
+
+          PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
+
+          PanelSectionHeader {
+            visible: root.connected && root.setupComplete && root.codecs.length > 0
+            text: "Audio codec"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          // Chips for each codec the buds currently advertise (LDAC needs the
+          // Nothing X "High-quality audio" setting on and dual connection off).
+          Row {
+            id: codecRow
+            visible: root.connected && root.setupComplete && root.codecs.length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property int count: root.codecs.length
+            readonly property real cellWidth:
+              count > 0 ? (width - spacing * (count - 1)) / count : width
+
+            Repeater {
+              model: root.codecs
+
+              delegate: Button {
+                required property var modelData
+
+                readonly property bool switching: root.pendingCodec === modelData
+
+                width: codecRow.cellWidth
+                // Switching renegotiates the A2DP link, which takes a few
+                // seconds. The chip shows only a spinning icon until the new
+                // codec reads back, centred by the button itself, and keeps
+                // its resting height so the row does not move.
+                property real restingHeight: 0
+                onImplicitHeightChanged: if (!switching) restingHeight = implicitHeight
+                height: switching && restingHeight > 0 ? restingHeight : implicitHeight
+                text: switching ? "" : String(modelData).toUpperCase()
+                iconText: switching ? "󰑓" : ""
+                iconSize: fontSize
+                iconSpinning: switching
+                selected: root.shownCodec === modelData
+                bordered: true
+                foreground: root.foreground
+                accent: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                onClicked: root.setCodec(modelData)
+              }
+            }
+          }
+
+          PanelSeparator {
+            visible: root.connected && root.setupComplete && root.codecs.length > 0
+            width: parent.width
+            foreground: root.foreground
+          }
+
+          Button {
+            width: parent.width
+            enabled: root.connected && root.setupComplete
+            opacity: root.connected && root.setupComplete ? 1.0 : 0.45
+            text: ringTimer.running ? "Stop" : "Find (f)"
+            iconText: "󰂚"
+            tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds (asks first)"
+            bordered: true
+            foreground: root.foreground
+            accent: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleRing()
+          }
+
+          Text {
+            visible: root.configNotice !== "" && root.setupComplete
+            width: parent.width
+            text: root.configNotice
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
           }
         }
+      }
+    }
+  }
 
-        PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
+  // Compact half-width switch tile for the Playback grid. Fill and border
+  // come from the theme foreground, as in ModeButton. The row owns the
+  // click; the switch is presentation only.
+  component ToggleTile: Rectangle {
+    id: tile
 
-        PanelSectionHeader {
-          visible: root.connected && root.setupComplete
-          text: "Playback"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
+    property string label: ""
+    property string tip: ""
+    property bool checked: false
+    signal toggled()
 
-        Toggle {
-          visible: root.connected && root.setupComplete
-          width: parent.width
-          label: "Low lag mode"
-          description: "Lower audio delay for games"
-          checked: root.lowLatency
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.setLatency(!root.lowLatency)
-        }
+    readonly property bool hot: tileMouse.containsMouse
 
-        Toggle {
-          visible: root.connected && root.setupComplete
-          width: parent.width
-          label: "In-ear detection"
-          description: "Pause when a bud is removed"
-          checked: root.inEar
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.setInEar(!root.inEar)
-        }
+    implicitHeight: Style.space(46)
+    radius: Style.cornerRadius
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.08 : 0.04)
+    border.width: 1
+    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tile.hot ? 0.25 : 0.14)
 
-        PanelSeparator { visible: root.connected; width: parent.width; foreground: root.foreground }
+    Behavior on color { ColorAnimation { duration: 100 } }
 
-        Button {
-          width: parent.width
-          enabled: root.connected && root.setupComplete
-          opacity: root.connected && root.setupComplete ? 1.0 : 0.45
-          text: ringTimer.running ? "Stop" : "Find (f)"
-          iconText: "󰂚"
-          tooltipText: ringTimer.running ? "Stop the tone" : "Ring both buds (asks first)"
-          bordered: true
-          foreground: root.foreground
-          accent: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.toggleRing()
-        }
+    Row {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(6)
 
-        Text {
-          visible: root.configNotice !== "" && root.setupComplete
-          width: parent.width
-          text: root.configNotice
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
+      Text {
+        width: parent.width - tileSwitch.width - parent.spacing
+        anchors.verticalCenter: parent.verticalCenter
+        text: tile.label
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      ToggleSwitch {
+        id: tileSwitch
+        anchors.verticalCenter: parent.verticalCenter
+        checked: tile.checked
+        interactive: false
+        foreground: root.foreground
+        accent: root.foreground
+      }
+    }
+
+    MouseArea {
+      id: tileMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tile.toggled()
+    }
+
+    PanelToolTip {
+      visible: tileMouse.containsMouse && tile.tip !== ""
+      text: tile.tip
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // Round choice with a caption, the ANC row look, for any two-way setting.
+  component ChoiceButton: Item {
+    id: choice
+
+    property string label: ""
+    property string iconName: ""
+    property bool selected: false
+    signal chosen()
+
+    readonly property real diameter: Style.space(44)
+    implicitHeight: choiceColumn.implicitHeight
+
+    Column {
+      id: choiceColumn
+      width: parent.width
+      spacing: Style.space(6)
+
+      Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: choice.diameter
+        height: choice.diameter
+        radius: width / 2
+        color: choice.selected
+          ? root.foreground
+          : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+
+        Behavior on color { ColorAnimation { duration: 180 } }
+
+        PhosphorIcon {
+          anchors.centerIn: parent
+          iconSize: Style.space(22)
+          icon: choice.iconName
+          color: choice.selected ? Color.popups.background : root.foreground
         }
       }
+
+      Text {
+        width: parent.width
+        text: choice.label
+        color: choice.selected ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+      }
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: choice.chosen()
     }
   }
 
@@ -944,7 +1343,7 @@ Panel {
     readonly property string iconName: value === "trans" ? "ear"
       : (value === "off" ? "prohibit" : "ear-slash")
 
-    readonly property bool selected: root.mode === value
+    readonly property bool selected: root.shownMode === value
     readonly property real diameter: Style.space(44)
 
     implicitHeight: modeColumn.implicitHeight
@@ -1011,32 +1410,27 @@ Panel {
       width: parent.width
       spacing: Style.space(4)
 
-      Text {
-        text: tile.label
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      Row {
+      // "LEFT   75%" on one line keeps the section short.
+      Item {
         width: parent.width
-        spacing: Style.space(3)
+        implicitHeight: labelText.implicitHeight
 
         Text {
-          text: tile.known ? tile.value : "—"
-          color: tile.tone
+          id: labelText
+          anchors.left: parent.left
+          text: tile.label
+          color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.title
+          font.pixelSize: Style.font.caption
         }
 
         Text {
-          visible: tile.known
-          text: "%"
+          anchors.right: parent.right
+          anchors.baseline: labelText.baseline
+          text: tile.known ? tile.value + "%" : "—"
           color: tile.tone
-          opacity: 0.6
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
-          anchors.baseline: parent.children[0].baseline
         }
       }
 
