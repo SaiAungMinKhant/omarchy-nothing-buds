@@ -79,13 +79,14 @@ Panel {
   }
 
   // ---------------------------------------------------------------- setup
-  // Complete only when the wrapper (byte-identical to the shipped one),
-  // earctl and the unit all exist; `install.sh --check` answers that and
-  // changes nothing.
+  // Complete only when the wrapper is byte-identical to the shipped one,
+  // earctl and the unit exist, and an earctl this plugin built matches the
+  // pin. `install.sh --check` answers that and changes nothing.
   property bool setupComplete: false
   // The "Set up" click: the consent that lets later states finish the job.
   property bool setupConsented: false
-  // Installer exit 2: everything but earctl, which needs a terminal.
+  // Installer exit 2: earctl is missing or from an older pin, and building
+  // it needs a terminal.
   property bool needsEarctl: false
   // The terminal install is detached, so polling is how we notice.
   property bool earctlPresent: false
@@ -147,7 +148,7 @@ Panel {
     if (code === 0) {
       root.needsEarctl = false
     } else if (code === 2) {
-      // Everything is in place except earctl, which needs a terminal.
+      // earctl is missing or stale; building it needs a terminal.
       root.needsEarctl = true
     } else if (code === 3) {
       root.lastError = "Setup needs bluetoothctl and jq (bluez-utils and jq)."
@@ -249,8 +250,8 @@ Panel {
   readonly property bool lowLatency: connected && state.low_latency === true
   readonly property bool inEar: connected && state.in_ear === true
 
-  // Ear (3)-only features. The wrapper reports null on models that don't
-  // support them, so `has*` gates whether the control appears at all.
+  // Model-gated features. The wrapper reports null on models without them,
+  // so `has*` gates whether the control appears at all.
   readonly property bool hasSuperMic: connected && typeof state.super_mic === "boolean"
   // Spatial audio has no getter, so support comes from the model earctl
   // resolved. Ear (3) and CMF Buds 2 take it; on Ear (3) it excludes bass.
@@ -385,8 +386,9 @@ Panel {
     superMicProc.start(root.cmd(["set", "super-mic", on ? "true" : "false"]))
   }
 
-  // Enabling bass keeps the current level (or 2 the first time). The wrapper
-  // clears spatial when bass turns on; mirror that locally so the tile agrees.
+  // Enabling bass keeps the current level, or 3 the first time. On Ear (3)
+  // the wrapper clears spatial when bass turns on. Mirror that locally so
+  // the tile agrees.
   function setEnhancedBass(on) {
     if (!root.claim(bassProc)) return
     if (on && root.bassExcludesSpatial) root.spatialFixed = false
@@ -401,8 +403,8 @@ Panel {
     bassProc.start(root.cmd(["set", "enhanced-bass", "true", String(n)]))
   }
 
-  // Set-only: reflect the intent locally, since status carries no spatial
-  // field. Enabling spatial clears bass on the device (mutual exclusivity).
+  // Set-only. Reflect the intent locally, since status carries no spatial
+  // field. On Ear (3) enabling spatial clears bass.
   function setSpatial(fixed) {
     if (!root.claim(spatialProc)) return
     root.spatialFixed = fixed
@@ -697,8 +699,8 @@ Panel {
     }
   }
 
-  // Spatial has no read-back of its own, but enabling it clears bass on the
-  // device, so re-read to update the bass tile.
+  // Spatial has no read-back of its own. The echoed status still carries
+  // bass, which Ear (3) clears when spatial turns on.
   BoundedProcess {
     id: spatialProc
     deadline: "20"
@@ -739,7 +741,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    // 520 clipped the action buttons.
+    // Past this the card scrolls. 520 clipped the action buttons.
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {
@@ -871,8 +873,8 @@ Panel {
               text: "Setup installs a few things outside this plugin's folder:\n"
                   + "the earbuds command in ~/.local/bin, a systemd --user\n"
                   + "service that talks to the earbuds, and a small config in\n"
-                  + "~/.config/earbuds. Nothing runs as root. If earctl is missing,\n"
-                  + "setup offers a terminal to build it from pinned source.\n"
+                  + "~/.config/earbuds. Nothing runs as root. If earctl is missing\n"
+                  + "or older than the pin, setup offers a terminal to build it.\n"
                   + "Git and a Rust toolchain are required for the build."
               color: root.dim
               font.family: root.fontFamily
@@ -914,8 +916,8 @@ Panel {
             Text {
               visible: !root.bootstrapping && root.needsEarctl && !root.earctlPresent
               width: parent.width
-              text: "Everything is installed except earctl, which talks to "
-                  + "the earbuds. Setup builds it from pinned source in a terminal. "
+              text: "Everything is installed except a current earctl, which talks "
+                  + "to the earbuds. Setup builds it from pinned source in a terminal. "
                   + "Git and a Rust toolchain are required; no password is needed."
               color: root.dim
               font.family: root.fontFamily

@@ -333,8 +333,8 @@ cmd_status() {
   fi
 
   # Six round trips, about 0.1s each. A bad read is absent, not fatal.
-  # The last two exist on Ear (3) only. Other models refuse them in a few
-  # ms and the fields stay null, so the panel omits those controls.
+  # The last two are model-gated. A model without them refuses in a few
+  # ms and the field stays null, so the panel omits that control.
   local anc battery latency inear bass supermic base
   anc=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_HEAD -c 8192)
   battery=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192)
@@ -419,7 +419,7 @@ cmd_disconnect() {
 
 # Named setters so the panel never has to know earctl's argument shapes.
 cmd_set() {
-  # Codec is a PipeWire setting, not an earbuds one: no RFCOMM session needed.
+  # Codec is a PipeWire setting, not an earbuds one, so no RFCOMM session is needed.
   if [[ ${1:-} == codec ]]; then
     codec_set "${2:-}"
     cmd_status
