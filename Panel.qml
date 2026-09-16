@@ -256,8 +256,12 @@ Panel {
   // Spatial audio has no getter, so support comes from the model earctl
   // resolved. Ear (3) and CMF Buds 2 take it; on Ear (3) it excludes bass.
   readonly property string modelBase: connected && state.model_base ? String(state.model_base) : ""
-  readonly property bool hasSpatial: modelBase === "B173" || modelBase === "B179"
+  readonly property bool hasSpatial: modelBase === "B173" || modelBase === "B179" || modelBase === "B170"
   readonly property bool bassExcludesSpatial: modelBase === "B173"
+  // Over-ear (Headphone (1), B170): one battery instead of left/right/case,
+  // and no case, so no find-a-bud tone.
+  readonly property bool isOverEar: modelBase === "B170"
+  readonly property bool hasSingleBattery: connected && typeof state.single === "number"
   readonly property bool superMic: connected && state.super_mic === true
   readonly property bool hasEnhancedBass: connected && typeof state.enhanced_bass === "boolean"
   readonly property bool enhancedBass: connected && state.enhanced_bass === true
@@ -763,7 +767,7 @@ Panel {
       onTextKey: function(t) {
         if (root.ringConfirmOpen) return
         if (t === "r" || t === "R") root.refresh()
-        else if (t === "f" || t === "F") root.toggleRing()
+        else if ((t === "f" || t === "F") && !root.isOverEar) root.toggleRing()
         else if (t === "1") root.setMode("off")
         else if (t === "2") root.setMode("trans")
         else if (t === "3") root.setMode("anc")
@@ -1089,19 +1093,37 @@ Panel {
             width: parent.width
             spacing: Style.space(8)
 
-            // The case only reports while connected; a permanent "—" would read as broken.
+            // Over-ear reports one battery; earbuds report left/right and,
+            // while connected, the case. A permanent "—" would read as broken.
+            readonly property bool single: root.hasSingleBattery
             readonly property bool hasCase: typeof root.state.case === "number"
-            readonly property int tiles: hasCase ? 3 : 2
+            readonly property int tiles: single ? 1 : (hasCase ? 3 : 2)
             readonly property real tileWidth:
               (width - spacing * (tiles - 1)) / tiles
 
-            BatteryTile { width: batteryRow.tileWidth; label: "LEFT";  value: root.state.left }
-            BatteryTile { width: batteryRow.tileWidth; label: "RIGHT"; value: root.state.right }
+            BatteryTile {
+              width: batteryRow.tileWidth
+              label: "BATTERY"
+              value: root.state.single
+              visible: batteryRow.single
+            }
+            BatteryTile {
+              width: batteryRow.tileWidth
+              label: "LEFT"
+              value: root.state.left
+              visible: !batteryRow.single
+            }
+            BatteryTile {
+              width: batteryRow.tileWidth
+              label: "RIGHT"
+              value: root.state.right
+              visible: !batteryRow.single
+            }
             BatteryTile {
               width: batteryRow.tileWidth
               label: "CASE"
               value: root.state.case
-              visible: batteryRow.hasCase
+              visible: !batteryRow.single && batteryRow.hasCase
             }
           }
 
@@ -1134,8 +1156,9 @@ Panel {
 
             ToggleTile {
               width: playbackGrid.cellWidth
-              label: "In-ear"
-              tip: "Pause when a bud is removed"
+              label: root.isOverEar ? "On-head" : "In-ear"
+              tip: root.isOverEar ? "Pause when removed from your head"
+                                  : "Pause when a bud is removed"
               checked: root.shownInEar
               onToggled: root.setInEar(!root.shownInEar)
             }
@@ -1272,7 +1295,9 @@ Panel {
             foreground: root.foreground
           }
 
+          // No case on the over-ear model, so no find-a-bud tone.
           Button {
+            visible: !root.isOverEar
             width: parent.width
             enabled: root.connected && root.setupComplete
             opacity: root.connected && root.setupComplete ? 1.0 : 0.45

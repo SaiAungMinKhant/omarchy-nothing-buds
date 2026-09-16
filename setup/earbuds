@@ -370,7 +370,8 @@ cmd_status() {
                  then $x.Level.charging else false end;
     {connected: true, paired: true, name: $n, anc: $anc,
      left: lvl($b.left), right: lvl($b.right), case: lvl($b.case),
-     charging: (chg($b.left) or chg($b.right)),
+     single: lvl($b.single),
+     charging: (chg($b.left) or chg($b.right) or chg($b.single)),
      low_latency: $lat.low_latency_enabled,
      in_ear: $ie.detection_enabled,
      enhanced_bass: $bass.enabled,
