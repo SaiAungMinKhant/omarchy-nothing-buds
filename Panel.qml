@@ -258,6 +258,8 @@ Panel {
   readonly property string modelBase: connected && state.model_base ? String(state.model_base) : ""
   readonly property bool hasSpatial: modelBase === "B173" || modelBase === "B179" || modelBase === "B170"
   readonly property bool bassExcludesSpatial: modelBase === "B173"
+  // Head-tracking is over-ear only (Headphone (1)); earbuds are Fixed/Off.
+  readonly property bool hasHeadTracking: modelBase === "B170"
   // Over-ear (Headphone (1), B170): one battery instead of left/right/case,
   // and no case, so no find-a-bud tone.
   readonly property bool isOverEar: modelBase === "B170"
@@ -270,7 +272,8 @@ Panel {
   readonly property var bassLevels: [1, 2, 3, 4, 5]
   // Spatial audio is set-only (the buds expose no getter), so its state is
   // local intent, not a reading. It can drift if changed from the phone.
-  property bool spatialFixed: false
+  // "off" | "fixed" | "head_tracking" (head_tracking is over-ear only).
+  property string spatialMode: "off"
 
   // A2DP codec is a host/PipeWire setting, reported by the wrapper via pactl.
   readonly property string codec: connected && state.codec ? String(state.codec) : ""
@@ -395,7 +398,7 @@ Panel {
   // the tile agrees.
   function setEnhancedBass(on) {
     if (!root.claim(bassProc)) return
-    if (on && root.bassExcludesSpatial) root.spatialFixed = false
+    if (on && root.bassExcludesSpatial) root.spatialMode = "off"
     var lvl = root.bassLevel >= 1 && root.bassLevel <= 5 ? root.bassLevel : 3
     bassProc.start(root.cmd(["set", "enhanced-bass", on ? "true" : "false", String(lvl)]))
   }
@@ -403,16 +406,24 @@ Panel {
   function setBassLevel(n) {
     if (n < 1 || n > 5 || !root.claim(bassProc)) return
     root.pendingBassLevel = n
-    if (root.bassExcludesSpatial) root.spatialFixed = false
+    if (root.bassExcludesSpatial) root.spatialMode = "off"
     bassProc.start(root.cmd(["set", "enhanced-bass", "true", String(n)]))
   }
 
   // Set-only. Reflect the intent locally, since status carries no spatial
-  // field. On Ear (3) enabling spatial clears bass.
-  function setSpatial(fixed) {
+  // field. On Ear (3) enabling spatial clears bass. Mode is one of
+  // "off" | "fixed" | "head_tracking".
+  function setSpatial(mode) {
     if (!root.claim(spatialProc)) return
-    root.spatialFixed = fixed
-    spatialProc.start(root.cmd(["set", "spatial", fixed ? "fixed" : "off"]))
+    root.spatialMode = mode
+    spatialProc.start(root.cmd(["set", "spatial", mode]))
+  }
+
+  // Keyboard 's' cycles the available modes: off -> fixed -> (head_tracking) -> off.
+  function cycleSpatial() {
+    var order = root.hasHeadTracking ? ["off", "fixed", "head_tracking"] : ["off", "fixed"]
+    var i = order.indexOf(root.spatialMode)
+    root.setSpatial(order[(i + 1) % order.length])
   }
 
   function setCodec(name) {
@@ -775,7 +786,7 @@ Panel {
         else if (t === "l" || t === "L") root.setLatency(!root.lowLatency)
         else if (t === "i" || t === "I") root.setInEar(!root.inEar)
         else if ((t === "b" || t === "B") && root.hasEnhancedBass) root.setEnhancedBass(!root.enhancedBass)
-        else if ((t === "s" || t === "S") && root.hasSpatial) root.setSpatial(!root.spatialFixed)
+        else if ((t === "s" || t === "S") && root.hasSpatial) root.cycleSpatial()
         else if ((t === "m" || t === "M") && root.hasSuperMic) root.setSuperMic(!root.superMic)
       }
 
@@ -1156,7 +1167,7 @@ Panel {
 
             ToggleTile {
               width: playbackGrid.cellWidth
-              label: root.isOverEar ? "On-head" : "In-ear"
+              label: root.isOverEar ? "Over-ear" : "In-ear"
               tip: root.isOverEar ? "Pause when removed from your head"
                                   : "Pause when a bud is removed"
               checked: root.shownInEar
@@ -1184,23 +1195,34 @@ Panel {
           Row {
             visible: root.connected && root.setupComplete && root.hasSpatial
             width: parent.width
-            readonly property real cellWidth: (width - spacing) / 2
+            // Over-ear adds Head-tracking, so three choices instead of two.
+            readonly property int choices: root.hasHeadTracking ? 3 : 2
+            readonly property real cellWidth: (width - spacing * (choices - 1)) / choices
             spacing: Style.space(8)
+
+            ChoiceButton {
+              visible: root.hasHeadTracking
+              width: parent.cellWidth
+              label: "Head-tracking"
+              iconName: "crosshair"
+              selected: root.spatialMode === "head_tracking"
+              onChosen: root.setSpatial("head_tracking")
+            }
 
             ChoiceButton {
               width: parent.cellWidth
               label: "Fixed"
               iconName: "circle-dashed"
-              selected: root.spatialFixed
-              onChosen: root.setSpatial(true)
+              selected: root.spatialMode === "fixed"
+              onChosen: root.setSpatial("fixed")
             }
 
             ChoiceButton {
               width: parent.cellWidth
               label: "Off"
               iconName: "prohibit"
-              selected: !root.spatialFixed
-              onChosen: root.setSpatial(false)
+              selected: root.spatialMode === "off"
+              onChosen: root.setSpatial("off")
             }
           }
 
