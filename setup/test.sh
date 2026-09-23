@@ -709,6 +709,16 @@ wrap status >/dev/null 2>&1
 assert_line "symlinked config refused, detection used instead" \
   "bluetoothctl info AA:BB:CC:DD:EE:FF" "$FAKE/log"
 
+# A FIFO at the address path is refused at once, not waited on.
+/usr/bin/rm -f -- "$H/.config/earbuds/address"
+/usr/bin/mkfifo -- "$H/.config/earbuds/address"
+log_reset
+env HOME="$H" XDG_CONFIG_HOME="$H/.config" XDG_STATE_HOME="$H/.local/state" \
+  /usr/bin/timeout 20 bash "$SUBJ/earbuds" status >/dev/null 2>&1
+assert_rc "FIFO config does not block the wrapper" 0 "$?"
+assert_line "FIFO config refused, detection used instead" \
+  "bluetoothctl info AA:BB:CC:DD:EE:FF" "$FAKE/log"
+
 # A garbage channel file is ignored in favour of the default.
 /usr/bin/rm -f -- "$H/.config/earbuds/address"
 echo "banana" >"$H/.config/earbuds/channel"
@@ -889,6 +899,60 @@ assert_rc "uninstall after discovery" 0 "$?"
 assert_gone "discovered channel removed" "$STATE_CH"
 assert_gone "state dir removed" "$H/.local/state/io.github.saiaungminkhant.nothing-buds"
 /usr/bin/rm -f -- "$FAKE/works-on-channel" "$FAKE/last-channel" "$FAKE/bt-connected"
+
+step "S18: config and state files are read through one no-follow, non-blocking descriptor"
+R=$T/read
+/usr/bin/mkdir -p -- "$R"
+# rc and value of nb_read_bounded, from each copy (lib.sh and the wrapper).
+read_lib() { # file max
+  ( source "$SUBJ/lib.sh"; v=""; nb_read_bounded "$1" "$2" v; printf '%s:%s' "$?" "$v" )
+}
+read_wrap() { # file max
+  ( eval "$(/usr/bin/sed -n '/^NB_PERL=/p; /^nb_read_bounded() {$/,/^}$/p' "$SUBJ/earbuds")"
+    v=""; nb_read_bounded "$1" "$2" v; printf '%s:%s' "$?" "$v" )
+}
+# Exported for the FIFO case, which runs under timeout in a child bash.
+export SUBJ
+export -f read_lib read_wrap
+printf 'AA:BB:CC:DD:EE:FF\n' >"$R/line"
+printf 'AA:BB:CC:DD:EE:FF' >"$R/no-newline"
+printf '12345678\n' >"$R/exact"
+printf '123456789\n' >"$R/long"
+printf '16\n17\n' >"$R/two-lines"
+printf '16\0' >"$R/nul"
+: >"$R/empty"
+/usr/bin/ln -s -- "$R/line" "$R/link"
+/usr/bin/mkfifo -- "$R/fifo"
+/usr/bin/mkdir -- "$R/dir"
+for which in lib wrap; do
+  assert_eq "$which: one line read" "$(read_$which "$R/line" 64)" "0:AA:BB:CC:DD:EE:FF"
+  assert_eq "$which: missing newline accepted" "$(read_$which "$R/no-newline" 64)" "0:AA:BB:CC:DD:EE:FF"
+  assert_eq "$which: exactly max bytes accepted" "$(read_$which "$R/exact" 8)" "0:12345678"
+  assert_eq "$which: max+1 bytes refused" "$(read_$which "$R/long" 8)" "2:"
+  assert_eq "$which: second line refused" "$(read_$which "$R/two-lines" 8)" "2:"
+  assert_eq "$which: NUL refused" "$(read_$which "$R/nul" 8)" "2:"
+  assert_eq "$which: empty file" "$(read_$which "$R/empty" 8)" "1:"
+  assert_eq "$which: missing file" "$(read_$which "$R/absent" 8)" "1:"
+  assert_eq "$which: symlink not followed" "$(read_$which "$R/link" 64)" "1:"
+  assert_eq "$which: directory refused" "$(read_$which "$R/dir" 64)" "1:"
+  out=$(/usr/bin/timeout 5 bash -c 'read_'"$which"' "$1" 64' _ "$R/fifo")
+  assert_eq "$which: FIFO refused without blocking (timeout rc $?)" "$out" "1:"
+done
+assert_eq "PERL5OPT cannot inject code" \
+  "$(PERL5OPT=-Mstrict=bogus read_lib "$R/line" 64)" "0:AA:BB:CC:DD:EE:FF"
+# The recorded earctl path is not read through a symlink either.
+new_home
+S=$H/.local/state/io.github.saiaungminkhant.nothing-buds
+/usr/bin/mkdir -p -- "$S" "$H/.config/earbuds"
+printf '%s\n' "$FAKE/evil-earctl" >"$T/evil-bin"
+/usr/bin/ln -s -- "$T/evil-bin" "$S/earctl-bin"
+printf '#!/bin/bash\necho "evil-earctl $*" >>"%s/log"\n' "$FAKE" >"$FAKE/evil-earctl"
+/usr/bin/chmod +x -- "$FAKE/evil-earctl"
+log_reset
+touch "$FAKE/bt-connected"
+wrap --address "AA:BB:CC:DD:EE:FF" status >/dev/null 2>&1
+/usr/bin/rm -f -- "$FAKE/bt-connected" "$FAKE/anc-failed"
+assert_no_line "symlinked earctl-bin not followed" "evil-earctl" "$FAKE/log"
 
 # ------------------------------------------------------------------ verdict
 

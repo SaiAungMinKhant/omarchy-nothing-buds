@@ -12,7 +12,7 @@
 #   0  done
 #   1  --check only: missing or out of date
 #   2  earctl missing or built from an older pin, needs a terminal; nothing else changed
-#   3  bluetoothctl or jq missing
+#   3  bluetoothctl, jq or perl missing
 #   4  consent not given
 #   5  pre-existing object refused (see --replace-existing)
 #   6  operational failure; rolled back
@@ -66,7 +66,7 @@ usage() {
 # Present and current, checked the way the wrapper checks itself: regular files, no symlinks.
 check_installed() {
   local want got
-  [[ -x $NB_BT && -x $NB_JQ ]] || return 1
+  [[ -x $NB_BT && -x $NB_JQ && -x $NB_PERL ]] || return 1
   [[ -e $NB_WRAPPER && ! -L $NB_WRAPPER && -f $NB_WRAPPER && -x $NB_WRAPPER ]] || return 1
   want=$(nb_sha_file "$here/earbuds") || return 1
   got=$(nb_sha_file "$NB_WRAPPER") || return 1
@@ -145,8 +145,8 @@ if (( ! consent )); then
   [[ $reply == [yY]* ]] || nb_fail 4 "declined"
 fi
 
-for dep in "$NB_BT" "$NB_JQ"; do
-  [[ -x $dep ]] || nb_fail 3 "$dep is required (install bluez-utils and jq)"
+for dep in "$NB_BT" "$NB_JQ" "$NB_PERL"; do
+  [[ -x $dep ]] || nb_fail 3 "$dep is required (install bluez-utils, jq and perl)"
 done
 
 # The manifest lives here; created fresh on a new install.

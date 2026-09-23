@@ -151,7 +151,7 @@ Panel {
       // earctl is missing or stale; building it needs a terminal.
       root.needsEarctl = true
     } else if (code === 3) {
-      root.lastError = "Setup needs bluetoothctl and jq (bluez-utils and jq)."
+      root.lastError = "Setup needs bluetoothctl, jq and perl (bluez-utils, jq, perl)."
     } else if (code === 5) {
       root.lastError = firstNote(err) ||
         "Setup refused: a pre-existing file is in the way (see README)."
