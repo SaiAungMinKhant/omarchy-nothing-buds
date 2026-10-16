@@ -76,6 +76,12 @@ if [[ $manifest_mode == true ]]; then
   if [[ -e $NB_STATE_DIR/channel || -L $NB_STATE_DIR/channel ]]; then
     note "  $NB_STATE_DIR/channel (discovered RFCOMM channel)"
   fi
+  if [[ -e $NB_STATE_DIR/channels || -L $NB_STATE_DIR/channels ]]; then
+    note "  $NB_STATE_DIR/channels (discovered RFCOMM channel per device)"
+  fi
+  if [[ -e $NB_STATE_DIR/selected || -L $NB_STATE_DIR/selected ]]; then
+    note "  $NB_STATE_DIR/selected (earbuds picked in the panel)"
+  fi
   if $keep_earctl; then
     note "  earctl is kept (--keep-earctl)"
   fi
@@ -221,12 +227,34 @@ if [[ $manifest_mode == true ]]; then
   case $? in
     1|2|6) partial=1 ;;
   esac
-  # The wrapper's discovered channel. Ours by location, not hashed.
-  if [[ -L $NB_STATE_DIR/channel ]]; then
-    nb_err "leaving $NB_STATE_DIR/channel: it is a symlink"
+  # The wrapper's discovered channels and the panel's pick. Ours by
+  # location, not hashed.
+  for f in "$NB_STATE_DIR/channel" "$NB_STATE_DIR/selected"; do
+    if [[ -L $f ]]; then
+      nb_err "leaving $f: it is a symlink"
+      partial=1
+    elif [[ -f $f ]]; then
+      $NB_RM -f -- "$f" 2>/dev/null || partial=1
+    fi
+  done
+  # One file per address, named AA_BB_CC_DD_EE_FF. Anything else is not ours.
+  chdir=$NB_STATE_DIR/channels
+  if [[ -L $chdir ]]; then
+    nb_err "leaving $chdir: it is a symlink"
     partial=1
-  elif [[ -f $NB_STATE_DIR/channel ]]; then
-    $NB_RM -f -- "$NB_STATE_DIR/channel" 2>/dev/null || partial=1
+  elif [[ -d $chdir ]]; then
+    for f in "$chdir"/* "$chdir"/.new.*; do
+      [[ -e $f || -L $f ]] || continue
+      name=${f##*/}
+      if [[ -L $f ]]; then
+        nb_err "leaving $f: it is a symlink"
+        partial=1
+      elif [[ -f $f && ( $name =~ ^([0-9A-F]{2}_){5}[0-9A-F]{2}$ || $name == .new.* ) ]]; then
+        $NB_RM -f -- "$f" 2>/dev/null || partial=1
+      fi
+    done
+    $NB_RMDIR -- "$chdir" 2>/dev/null ||
+      { nb_err "leaving $chdir: not empty"; partial=1; }
   fi
 
   owned_dirs=()
