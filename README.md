@@ -155,7 +155,7 @@ The wrapper resolves your earbuds' address in this order:
 1. `--address`
 2. the pair picked in the panel, if it is still paired
 3. `~/.config/earbuds/address`, while that pair is connected
-4. the first connected device whose name looks like a Nothing or CMF product
+4. the first paired and connected device whose name looks like a Nothing or CMF product
 5. `~/.config/earbuds/address`
 6. the first paired one
 

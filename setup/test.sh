@@ -1009,14 +1009,21 @@ assert_no_line "symlinked earctl-bin not followed" "evil-earctl" "$FAKE/log"
 step "S19: several paired buds; the session follows the one asked for"
 A=AA:BB:CC:DD:EE:01
 B=AA:BB:CC:DD:EE:02
+# Seen nearby, never paired, listed first. Its name and alias are the
+# remote's to choose: one says "Connected: yes", the other smuggles property
+# lines in behind a newline. The real lines come last, as bluetoothctl prints them.
+S=11:22:33:44:55:88
 MD=$T/multi
 /usr/bin/mkdir -p -- "$MD"
 # Two buds. Link state per address in $MD/conn-<address>, yes or no.
+# $MD/only-spoof: nothing paired, only the spoofer is known.
 cat >"$FAKE/bluetoothctl" <<EOF
 #!/bin/bash
 echo "bluetoothctl \$*" >> "$FAKE/log"
 case \$1 in
   devices)
+    [[ \$2 == Paired ]] || echo "Device $S Nothing Ear Connected: yes"
+    [[ ! -f "$MD/only-spoof" ]] || exit 0
     echo "Device $A CMF Buds 2"
     echo "Device 11:22:33:44:55:66 Some Keyboard"
     echo "Device 11:22:33:44:55:77 Galaxy Buds2 Pro"
@@ -1027,6 +1034,9 @@ case \$1 in
     case \$2 in
       $A) echo "Name: CMF Buds 2" ;;
       $B) echo "Name: Nothing Ear (3)" ;;
+      $S) printf '\tName: Nothing Ear Connected: yes\n\tAlias: Nothing Ear\n\tPaired: yes\n\tConnected: yes\n'
+          printf '\tPaired: no\n\tConnected: no\n'
+          exit 0 ;;
       *)  exit 1 ;;
     esac
     echo "Paired: yes"
@@ -1055,8 +1065,10 @@ echo no >"$MD/conn-$A"
 echo yes >"$MD/conn-$B"
 out=$(wrap list)
 assert_rc "list" 0 "$?"
-assert_eq "list: two buds" "$(echo "$out" | /usr/bin/jq -r '.devices | length')" "2"
-assert_eq "list: keyboard left out" "$(echo "$out" | /usr/bin/jq -r '[.devices[].address] | join(",")')" "$A,$B"
+assert_eq "list: two buds and the spoofer" "$(echo "$out" | /usr/bin/jq -r '.devices | length')" "3"
+assert_eq "list: keyboard left out" "$(echo "$out" | /usr/bin/jq -r '[.devices[].address] | join(",")')" "$S,$A,$B"
+assert_eq "list: spoofer reported unpaired" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$S\") | .paired")" "false"
+assert_eq "list: spoofer reported not connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$S\") | .connected")" "false"
 assert_eq "list: B connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$B\") | .connected")" "true"
 assert_eq "list: A not connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$A\") | .connected")" "false"
 assert_eq "list: nothing selected" "$(echo "$out" | /usr/bin/jq -r .selected)" "null"
@@ -1065,6 +1077,24 @@ assert_eq "list: nothing selected" "$(echo "$out" | /usr/bin/jq -r .selected)" "
 out=$(wrap status)
 assert_eq "connected buds chosen over the first listed" "$(echo "$out" | /usr/bin/jq -r .address)" "$B"
 assert_eq "and read" "$(echo "$out" | /usr/bin/jq -r .connected)" "true"
+
+# Nothing connected: the first paired buds, never the spoofer listed first.
+echo no >"$MD/conn-$B"
+assert_eq "spoofer skipped for the first paired buds" "$(wrap status | /usr/bin/jq -r .address)" "$A"
+echo yes >"$MD/conn-$B"
+
+# Nothing paired at all: no session goes to a device that is only a name
+# seen nearby, not even when picked or asked to connect.
+touch "$MD/only-spoof"
+/usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address"
+log_reset
+assert_eq "only the spoofer known: no earbuds found" "$(wrap status | /usr/bin/jq -r .error)" "no earbuds found"
+assert_eq "only the spoofer known: connect finds no earbuds" "$(wrap connect | /usr/bin/jq -r .error)" "no earbuds found"
+wrap select "$S" >/dev/null
+assert_eq "spoofer picked: still no earbuds" "$(wrap status | /usr/bin/jq -r .error)" "no earbuds found"
+assert_no_line "spoofer never linked" "bluetoothctl connect $S" "$FAKE/log"
+assert_no_line "spoofer never given a session" "auto-connect --bluetooth-address $S" "$FAKE/log"
+/usr/bin/rm -f -- "$MD/only-spoof" "$SD/selected"
 
 # The regression: session open on B, then A is asked for. It must move.
 echo yes >"$MD/conn-$A"
@@ -1232,6 +1262,32 @@ assert_gone "write temp removed" "$SD/channels/.new.x"
 assert_exists "symlinked channel left" "$SD/channels/${B//:/_}"
 assert_eq "symlink target untouched" "$(/usr/bin/cat "$T/chan-victim")" "keep"
 assert_exists "foreign file left" "$SD/channels/notes"
+
+step "S20: the installer pins only a paired device, and its scan is bounded"
+new_home
+make_earctl
+touch "$MD/only-spoof"
+run_install --yes >/dev/null 2>&1
+assert_rc "install with only a nearby unpaired device" 0 "$?"
+assert_gone "unpaired device not pinned" "$H/.config/earbuds/address"
+/usr/bin/rm -f -- "$MD/only-spoof"
+
+# A bluetoothctl that ignores TERM and keeps spawning: the scan still ends.
+cat >"$FAKE/bluetoothctl" <<'EOF'
+#!/bin/bash
+trap '' TERM
+for i in $(/usr/bin/seq 1 300); do /usr/bin/sleep 1; done
+EOF
+/usr/bin/chmod 755 "$FAKE/bluetoothctl"
+new_home
+make_earctl
+t0=$SECONDS
+env HOME="$H" XDG_CONFIG_HOME="$H/.config" XDG_STATE_HOME="$H/.local/state" \
+  /usr/bin/timeout 60 bash "$SUBJ/install.sh" --yes </dev/null >/dev/null 2>&1
+rc=$?
+cost=$((SECONDS - t0))
+assert_rc "install survives a bluetoothctl that ignores TERM" 0 "$rc"
+if (( cost < 30 )); then ok "scan ended in ${cost}s"; else bad "scan took ${cost}s"; fi
 
 # ------------------------------------------------------------------ verdict
 

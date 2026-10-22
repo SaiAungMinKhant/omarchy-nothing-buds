@@ -132,8 +132,8 @@ usage() {
     "  anything else            passed straight to earctl" \
     "" \
     "address resolution: --address, then the selected one if still paired, then" \
-    "$NB_CONF_DIR/address while connected, then the first connected device" \
-    "that looks like a Nothing or CMF product, then $NB_CONF_DIR/address," \
+    "$NB_CONF_DIR/address while connected, then the first paired and connected" \
+    "device that looks like a Nothing or CMF product, then $NB_CONF_DIR/address," \
     "then the first paired one." \
     "channel resolution: --channel, then $NB_CONF_DIR/channel, then the one" \
     "discovered for this address, then $NB_LEGACY_CHANNEL_FILE, else 16."
@@ -198,23 +198,30 @@ bt_info_of() {
   $NB_TIMEOUT --kill-after=2 5 "$NB_BT" info "$1" 2>/dev/null | $NB_HEAD -c 4096
 }
 
-# Whether bluetoothctl info for $1 says "$2: yes" (Paired, Connected).
-bt_is() { [[ $(bt_info_of "$1") == *"$2: yes"* ]]; }
+# Whether bluetoothctl info text $1 says "$2: yes" (Paired, Connected). Only
+# a whole line counts, and the last one: a device name is the remote's to
+# choose and may carry "Connected: yes" or a newline, and bluetoothctl
+# prints Name and Alias before the properties.
+info_says() {
+  [[ $($NB_AWK -v k="$2:" '$1 == k { v = $2 } END { print v }' <<<"$1") == yes ]]
+}
 
-# First connected candidate, else $1 when given, else the first paired
-# one, else the first seen.
+bt_is() { info_says "$(bt_info_of "$1")" "$2"; }
+
+# First paired and connected candidate, else $1 when given, else the first
+# paired one. An unpaired device is only ever a name seen nearby.
 detect_addr() {
-  local fallback=${1:-} a name info first="" paired=""
+  local fallback=${1:-} a name info paired=""
   while IFS=$'\t' read -r a name; do
-    [[ -n $first ]] || first=$a
     info=$(bt_info_of "$a")
-    if [[ $info == *"Connected: yes"* ]]; then
+    info_says "$info" Paired || continue
+    if info_says "$info" Connected; then
       printf '%s' "$a"
       return 0
     fi
-    [[ -n $paired || $info != *"Paired: yes"* ]] || paired=$a
+    [[ -n $paired ]] || paired=$a
   done < <(candidates)
-  printf '%s' "${fallback:-${paired:-$first}}"
+  printf '%s' "${fallback:-$paired}"
 }
 
 ADDR=""
@@ -659,8 +666,8 @@ cmd_list() {
   local a name info paired connected devices='[]' selected config
   while IFS=$'\t' read -r a name; do
     info=$(bt_info_of "$a")
-    paired=false; [[ $info == *"Paired: yes"* ]] && paired=true
-    connected=false; [[ $info == *"Connected: yes"* ]] && connected=true
+    paired=false; info_says "$info" Paired && paired=true
+    connected=false; info_says "$info" Connected && connected=true
     devices=$($NB_JQ -c --arg a "$a" --arg n "${name:0:128}" --argjson p "$paired" --argjson c "$connected" \
       '. + [{address:$a, name:$n, paired:$p, connected:$c}]' <<<"$devices") || devices='[]'
   done < <(candidates)

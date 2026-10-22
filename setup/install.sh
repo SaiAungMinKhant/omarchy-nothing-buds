@@ -212,7 +212,7 @@ fi
 # offers a choice, so a pin would only get in the way.
 if ! [[ -r $NB_CONF_DIR/address ]]; then
   # `|| true`: grep exits 1 on no match.
-  addrs=$($NB_TIMEOUT 10 "$NB_BT" devices 2>/dev/null |
+  addrs=$($NB_TIMEOUT --kill-after=2 10 "$NB_BT" devices Paired 2>/dev/null |
     $NB_HEAD -c 8192 |
     $NB_GREP -iE "$NB_NAME_RE" |
     $NB_HEAD -n 16 |
