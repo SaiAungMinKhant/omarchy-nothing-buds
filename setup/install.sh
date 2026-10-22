@@ -206,21 +206,31 @@ else
   nb_ensure_dir_chain "$NB_CONF_DIR" || nb_fail $? "could not prepare $NB_CONF_DIR"
 fi
 
-# A pre-existing address file always wins.
+# A pre-existing address file always wins. Only a single pair is pinned:
+# with several, the wrapper follows whichever is connected and the panel
+# offers a choice, so a pin would only get in the way.
 if ! [[ -r $NB_CONF_DIR/address ]]; then
   # `|| true`: grep exits 1 on no match.
-  addr=$($NB_TIMEOUT 10 "$NB_BT" devices 2>/dev/null |
+  addrs=$($NB_TIMEOUT 10 "$NB_BT" devices 2>/dev/null |
     $NB_HEAD -c 8192 |
-    $NB_GREP -iE 'nothing|[[:space:]]cmf|ear \(|buds' |
-    $NB_HEAD -n 1 |
+    $NB_GREP -iE 'nothing|[[:space:]]cmf|ear \(' |
+    $NB_HEAD -n 16 |
     $NB_AWK '{print $2}' || true)
-  nb_valid_addr "$addr" || addr=""
-  if [[ -n $addr ]]; then
+  found=()
+  while IFS= read -r addr; do
+    nb_valid_addr "$addr" && found+=("$addr")
+  done <<<"$addrs"
+  if (( ${#found[@]} == 1 )); then
+    addr=${found[0]}
     nb_write_if_absent "$NB_CONF_DIR/address" 644 "$addr"
     case $? in
       0) say "Pinned earbuds address $addr in $NB_CONF_DIR/address" ;;
       2) note "A symlink already exists at $NB_CONF_DIR/address; leaving it alone" ;;
     esac
+  elif (( ${#found[@]} > 1 )); then
+    say "Found ${#found[@]} Nothing or CMF devices: ${found[*]}"
+    note "Not pinning one. The widget controls whichever is connected, and the"
+    note "panel lets you pick when several are."
   else
     say "No Nothing or CMF device is paired yet."
     note "Pair your earbuds and the widget will find them. To pin one by hand:"

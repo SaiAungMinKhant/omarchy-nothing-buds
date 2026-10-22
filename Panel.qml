@@ -70,10 +70,12 @@ Panel {
       : ""
   }
 
-  // The wrapper takes overrides as arguments, never as environment.
-  function cmd(args) {
+  // The wrapper takes overrides as arguments, never as environment. The
+  // active address always goes along, so the wrapper never picks other buds.
+  function cmd(args) { return cmdFor(activeAddress, args) }
+  function cmdFor(address, args) {
     var out = [earbudsBin]
-    if (addrValid) out.push("--address", cfgAddress)
+    if (address !== "") out.push("--address", address)
     if (channelValid) out.push("--channel", String(cfgChannel))
     return out.concat(args)
   }
@@ -170,18 +172,122 @@ Panel {
   // Link state comes from BlueZ directly (instant); the wrapper is still the source for ANC and battery.
   readonly property var btDevices: Bluetooth.devices ? Bluetooth.devices.values : []
 
-  readonly property var btDevice: {
-    var wanted = String(root.cfgAddress).toUpperCase()
-    var fallback = null
+  // ---------------------------------------------------------------- devices
+  // Every known Nothing or CMF device, connected ones first. Known as the
+  // Bluetooth panel counts it: paired, bonded or trusted, since Quickshell can
+  // report a bonded device as unpaired. The name test is the wrapper's
+  // NB_NAME_RE, so both sides see the same buds.
+  readonly property var earbudDevices: {
+    var conn = [], rest = []
     for (var i = 0; i < btDevices.length; i++) {
       var d = btDevices[i]
-      if (!d) continue
-      if (wanted !== "" && String(d.address || "").toUpperCase() === wanted) return d
-      // No pinned address: first paired device the wrapper would also pick.
-      if (fallback === null && d.paired && /nothing|(^|\s)cmf\s|ear \(/i.test(String(d.name || "")))
-        fallback = d
+      if (!d || !(d.paired || d.bonded || d.trusted)) continue
+      if (!/nothing|(^|\s)cmf|ear \(/i.test(String(d.name || ""))) continue
+      if (d.connected === true) conn.push(d)
+      else rest.push(d)
     }
-    return wanted !== "" ? null : fallback
+    return conn.concat(rest)
+  }
+
+  function deviceFor(address) {
+    for (var i = 0; i < earbudDevices.length; i++)
+      if (String(earbudDevices[i].address || "").toUpperCase() === address) return earbudDevices[i]
+    return null
+  }
+  function hasDevice(address) { return deviceFor(address) !== null }
+
+  // The pick, kept by the wrapper in its state dir (`earbuds select`), and
+  // ~/.config/earbuds/address, both read through `earbuds list` at start.
+  property string pickedAddress: ""
+  property string configAddress: ""
+  // A click made while the first list was in flight wins over it.
+  property bool pickTouched: false
+
+  // shell.json pin, then the pick, then the config file's buds while they
+  // are connected, then whatever is connected, then the config file's buds,
+  // then the first paired. The wrapper resolves in the same order. Only
+  // known buds qualify past the pin.
+  readonly property string activeAddress: {
+    if (addrValid) return String(cfgAddress).toUpperCase()
+    if (pickedAddress !== "" && hasDevice(pickedAddress)) return pickedAddress
+    var conf = deviceFor(configAddress)
+    if (conf && conf.connected === true) return configAddress
+    // earbudDevices lists connected buds first.
+    var first = earbudDevices.length > 0 ? earbudDevices[0] : null
+    if (first && first.connected === true) return String(first.address || "").toUpperCase()
+    if (conf) return configAddress
+    return first ? String(first.address || "").toUpperCase() : ""
+  }
+
+  readonly property var btDevice: {
+    var wanted = root.activeAddress
+    if (wanted === "") return null
+    for (var i = 0; i < btDevices.length; i++) {
+      var d = btDevices[i]
+      if (d && String(d.address || "").toUpperCase() === wanted) return d
+    }
+    return null
+  }
+
+  readonly property bool canPick: !addrValid && earbudDevices.length > 1
+
+  readonly property var deviceOptions: {
+    var out = []
+    for (var i = 0; i < earbudDevices.length; i++) {
+      var d = earbudDevices[i]
+      out.push({
+        value: String(d.address || "").toUpperCase(),
+        label: String(d.name || d.address) + (d.connected === true ? "  ·  connected" : "")
+      })
+    }
+    return out
+  }
+
+  // Picking buds that are not linked links them, so the choice takes effect.
+  function pickDevice(address) {
+    var a = String(address || "").toUpperCase()
+    if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(a)) return
+    root.pickTouched = true
+    if (a === root.activeAddress) return
+    root.pickedAddress = a
+    selectProc.start([earbudsBin, "select", a])
+    if (root.btDevice && root.btDevice.connected !== true) Qt.callLater(function() { root.setLink(true) })
+  }
+
+  function listDone(out, ok) {
+    if (!ok) return
+    var r = null
+    try { r = JSON.parse(String(out || "").trim()) } catch (e) { return }
+    if (!r) return
+    if (!root.pickTouched && typeof r.selected === "string") root.pickedAddress = r.selected.toUpperCase()
+    if (typeof r.config === "string") root.configAddress = r.config.toUpperCase()
+  }
+
+  // Another device is another session: drop everything in flight or shown
+  // for the old one. Replies still on their way are refused by apply().
+  onActiveAddressChanged: {
+    // The tone does not stop on its own, and the session is about to leave
+    // the buds playing it.
+    if (ringTimer.running) root.stopRing()
+    var ps = [statusProc, setProc, ringProc, latencyProc, inEarProc,
+              superMicProc, bassProc, spatialProc, codecProc, discoverProc]
+    for (var i = 0; i < ps.length; i++) ps[i].stop()
+    root.ringConfirmOpen = false
+    root.busy = false
+    root.discovering = false
+    root.state = ({ connected: false, paired: false })
+    root.pendingAnc = ""
+    root.pendingCodec = ""
+    root.pendingLatency = -1
+    root.pendingInEar = -1
+    root.pendingBassLevel = 0
+    root.spatialFixed = false
+    root.silentReads = 0
+    root.discoveredThisLink = false
+    root.discoverNote = ""
+    root.lastError = ""
+    root.linkFailed = false
+    Qt.callLater(root.refresh)
   }
 
   readonly property bool paired: btDevice !== null && btDevice.paired === true
@@ -292,7 +398,11 @@ Panel {
     var text = String(raw || "").trim()
     if (!text) return
     try {
-      root.state = JSON.parse(text)
+      var next = JSON.parse(text)
+      // A reply about other buds, from before a switch, is not this device's state.
+      if (next && typeof next.address === "string" && root.activeAddress !== ""
+          && next.address.toUpperCase() !== root.activeAddress) return
+      root.state = next
       root.pendingAnc = ""
       root.pendingCodec = ""
       root.pendingLatency = -1
@@ -343,9 +453,13 @@ Panel {
     root.ringConfirmOpen = false
   }
 
+  // The buds the running tone was sent to, so a switch can still stop it.
+  property string ringingAddress: ""
+
   function ring() {
     root.ringConfirmOpen = false
     if (!root.connected) return
+    root.ringingAddress = root.activeAddress
     ringProc.start(root.cmd(["ring"]))
     ringTimer.restart()
   }
@@ -359,7 +473,7 @@ Panel {
   function stopRing() {
     root.ringConfirmOpen = false
     ringTimer.stop()
-    unringProc.start(root.cmd(["unring"]))
+    unringProc.start(root.cmdFor(root.ringingAddress, ["unring"]))
   }
 
   function setLink(on) {
@@ -418,13 +532,14 @@ Panel {
   }
 
   function stopAll() {
-    var ps = [probeProc, earctlProc, bootstrapProc, statusProc, setProc,
+    var ps = [listProc, selectProc, probeProc, earctlProc, bootstrapProc, statusProc, setProc,
               ringProc, unringProc, linkProc, latencyProc, inEarProc,
               superMicProc, bassProc, spatialProc, codecProc, discoverProc]
     for (var i = 0; i < ps.length; i++) ps[i].stop()
   }
 
   Component.onCompleted: root.probe()
+  onSetupCompleteChanged: if (root.setupComplete) listProc.start([earbudsBin, "list"])
   Component.onDestruction: root.stopAll()
 
   // BlueZ said so; ask the wrapper for details now rather than next poll.
@@ -544,6 +659,23 @@ Panel {
         bp.running = false
         if (bp.onDone) bp.onDone(124, "", bp.errBuf, false)
       }
+    }
+  }
+
+  // The saved pick and the config address. Link state itself comes from BlueZ.
+  BoundedProcess {
+    id: listProc
+    deadline: "30"
+    cap: 16384
+    onDone: function(code, out, err, ok) { root.listDone(out, ok) }
+  }
+
+  BoundedProcess {
+    id: selectProc
+    deadline: "30"
+    cap: 16384
+    onDone: function(code, out, err, ok) {
+      if (!ok) root.lastError = root.firstNote(err) || "Could not save the device choice."
     }
   }
 
@@ -848,6 +980,20 @@ Panel {
                 }
               }
             }
+          }
+
+          // Several paired buds and no shell.json pin: choose which to control.
+          // earctl talks to one pair at a time.
+          Dropdown {
+            visible: root.setupComplete && root.canPick
+            width: parent.width
+            showLabel: false
+            options: root.deviceOptions
+            value: root.activeAddress
+            foreground: root.foreground
+            background: root.bar ? root.bar.background : Color.background
+            fontFamily: root.fontFamily
+            onChanged: function(v) { root.pickDevice(v) }
           }
 
           Text {

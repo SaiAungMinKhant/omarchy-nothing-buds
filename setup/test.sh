@@ -93,6 +93,7 @@ for f in lib.sh earbuds; do
     -e "s|^NB_YAY=.*|NB_YAY=$FAKE/yay|" \
     -e "s|^NB_GIT=.*|NB_GIT=$FAKE/git|" \
     -e "s|^NB_EARCTL_FALLBACK=.*|NB_EARCTL_FALLBACK=$FAKE/earctl|" \
+    -e "s|^NB_PACTL=.*|NB_PACTL=$FAKE/pactl|" \
     "$SUBJ/$f"
 done
 
@@ -104,6 +105,8 @@ assert_eq "earbuds bluetoothctl rewritten" \
   "$(/usr/bin/grep -c "^NB_BT=$FAKE/bluetoothctl$" "$SUBJ/earbuds")" "1"
 assert_eq "earbuds earctl fallback rewritten" \
   "$(/usr/bin/grep -c "^NB_EARCTL_FALLBACK=$FAKE/earctl$" "$SUBJ/earbuds")" "1"
+assert_eq "earbuds pactl rewritten" \
+  "$(/usr/bin/grep -c "^NB_PACTL=$FAKE/pactl$" "$SUBJ/earbuds")" "1"
 
 # Stand-in for the 0.0.1 wrapper (its bytes are not in this repo).
 printf '#!/bin/bash\n# legacy wrapper from a pre-manifest release\necho legacy\n' >"$FAKE/legacy-earbuds"
@@ -183,13 +186,28 @@ fi
 # Channel gate: with works-on-channel present, reads answer only after an
 # auto-connect on that channel. Other channels accept and stay silent, like
 # real buds on the wrong RFCOMM channel.
+# One session, as in earctl: auto-connect refuses while one is open, and
+# `session` reports the RFCOMM socket address as "[ADDRESS]:CHANNEL".
 case $1 in
   auto-connect)
+    [[ ! -f "__FAKE__/last-channel" ]] || exit 1
+    shift
     while (( $# > 1 )); do
       [[ $1 == --channel ]] && echo "$2" >"__FAKE__/last-channel"
+      [[ $1 == --bluetooth-address ]] && echo "$2" >"__FAKE__/last-address"
       shift
     done ;;
-  disconnect) /usr/bin/rm -f -- "__FAKE__/last-channel" ;;
+  disconnect) /usr/bin/rm -f -- "__FAKE__/last-channel" "__FAKE__/last-address" ;;
+  session)
+    [[ -f "__FAKE__/last-channel" ]] || exit 1
+    printf '{"id":"0","port_path":"[%s]:%s","model":null}\n' \
+      "$(/usr/bin/cat "__FAKE__/last-address" 2>/dev/null)" "$(/usr/bin/cat "__FAKE__/last-channel")"
+    exit 0 ;;
+esac
+# Like earctl, nothing but the session calls answers without a session.
+case $1 in
+  auto-connect|disconnect|session|server) ;;
+  *) [[ -f "__FAKE__/last-channel" ]] || exit 1 ;;
 esac
 if [[ -f "__FAKE__/works-on-channel" ]] && [[ $1 == battery || ( $1 == anc && $2 == get ) ]]; then
   [[ -f "__FAKE__/last-channel" ]] || exit 1
@@ -232,6 +250,17 @@ esac
 exit 0
 EOF
 
+# Sinks and cards come from files, so codec tests can stage several buds.
+cat >"$FAKE/pactl" <<EOF
+#!/bin/bash
+echo "pactl \$*" >> "$FAKE/log"
+case "\$1 \$2" in
+  "list sinks") [[ ! -f "$FAKE/pactl-sinks" ]] || /usr/bin/cat "$FAKE/pactl-sinks" ;;
+  "list cards") [[ ! -f "$FAKE/pactl-cards" ]] || /usr/bin/cat "$FAKE/pactl-cards" ;;
+esac
+exit 0
+EOF
+
 cat >"$FAKE/pacman" <<EOF
 #!/bin/bash
 echo "pacman \$*" >> "$FAKE/log"
@@ -268,7 +297,7 @@ echo "cargo $*" >>"$fake/log"
 /usr/bin/chmod 755 target/release/earctl
 EOF
 
-for f in bluetoothctl systemctl yay pacman git rustup; do
+for f in bluetoothctl systemctl yay pacman pactl git rustup; do
   /usr/bin/chmod 755 "$FAKE/$f"
 done
 
@@ -819,7 +848,7 @@ log_reset
 make_earctl
 run_install --yes
 assert_rc "install for discovery" 0 "$?"
-STATE_CH=$H/.local/state/io.github.saiaungminkhant.nothing-buds/channel
+STATE_CH=$H/.local/state/io.github.saiaungminkhant.nothing-buds/channels/AA_BB_CC_DD_EE_FF
 echo 15 >"$FAKE/works-on-channel"
 echo yes >"$FAKE/bt-connected"
 
@@ -953,6 +982,213 @@ touch "$FAKE/bt-connected"
 wrap --address "AA:BB:CC:DD:EE:FF" status >/dev/null 2>&1
 /usr/bin/rm -f -- "$FAKE/bt-connected" "$FAKE/anc-failed"
 assert_no_line "symlinked earctl-bin not followed" "evil-earctl" "$FAKE/log"
+
+step "S19: several paired buds; the session follows the one asked for"
+A=AA:BB:CC:DD:EE:01
+B=AA:BB:CC:DD:EE:02
+MD=$T/multi
+/usr/bin/mkdir -p -- "$MD"
+# Two buds. Link state per address in $MD/conn-<address>, yes or no.
+cat >"$FAKE/bluetoothctl" <<EOF
+#!/bin/bash
+echo "bluetoothctl \$*" >> "$FAKE/log"
+case \$1 in
+  devices)
+    echo "Device $A CMF Buds 2"
+    echo "Device 11:22:33:44:55:66 Some Keyboard"
+    echo "Device 11:22:33:44:55:77 Galaxy Buds2 Pro"
+    echo "Device $B Nothing Ear (3)" ;;
+  connect)    echo yes >"$MD/conn-\$2" ;;
+  disconnect) echo no  >"$MD/conn-\$2" ;;
+  info)
+    case \$2 in
+      $A) echo "Name: CMF Buds 2" ;;
+      $B) echo "Name: Nothing Ear (3)" ;;
+      *)  exit 1 ;;
+    esac
+    echo "Paired: yes"
+    if [[ -f "$MD/conn-\$2" && \$(/usr/bin/cat "$MD/conn-\$2") == yes ]]; then
+      echo "Connected: yes"
+    else
+      echo "Connected: no"
+    fi ;;
+esac
+exit 0
+EOF
+/usr/bin/chmod 755 "$FAKE/bluetoothctl"
+/usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address" "$FAKE/works-on-channel" \
+  "$FAKE/anc-fail-first" "$FAKE/anc-failed" "$FAKE/bt-devices"
+
+new_home
+make_earctl
+log_reset
+run_install --yes
+assert_rc "install with two buds paired" 0 "$?"
+assert_gone "no address pinned when several buds are paired" "$H/.config/earbuds/address"
+SD=$H/.local/state/io.github.saiaungminkhant.nothing-buds
+
+# list: both buds, nothing else, link state per address.
+echo no >"$MD/conn-$A"
+echo yes >"$MD/conn-$B"
+out=$(wrap list)
+assert_rc "list" 0 "$?"
+assert_eq "list: two buds" "$(echo "$out" | /usr/bin/jq -r '.devices | length')" "2"
+assert_eq "list: keyboard left out" "$(echo "$out" | /usr/bin/jq -r '[.devices[].address] | join(",")')" "$A,$B"
+assert_eq "list: B connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$B\") | .connected")" "true"
+assert_eq "list: A not connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$A\") | .connected")" "false"
+assert_eq "list: nothing selected" "$(echo "$out" | /usr/bin/jq -r .selected)" "null"
+
+# No pin and no pick: the connected buds, not the first listed.
+out=$(wrap status)
+assert_eq "connected buds chosen over the first listed" "$(echo "$out" | /usr/bin/jq -r .address)" "$B"
+assert_eq "and read" "$(echo "$out" | /usr/bin/jq -r .connected)" "true"
+
+# The regression: session open on B, then A is asked for. It must move.
+echo yes >"$MD/conn-$A"
+log_reset
+out=$(wrap --address "$A" status)
+assert_eq "switch: reply is about A" "$(echo "$out" | /usr/bin/jq -r .address)" "$A"
+assert_eq "switch: A read" "$(echo "$out" | /usr/bin/jq -r .connected)" "true"
+assert_line "switch: B's session dropped" "^earctl disconnect" "$FAKE/log"
+assert_line "switch: session opened on A" "auto-connect --bluetooth-address $A" "$FAKE/log"
+assert_eq "switch: earctl now on A" "$(/usr/bin/cat "$FAKE/last-address")" "$A"
+
+# Same buds again: the session is reused, not reopened.
+log_reset
+out=$(wrap --address "$A" status)
+assert_eq "same buds: read" "$(echo "$out" | /usr/bin/jq -r .connected)" "true"
+assert_no_line "same buds: no reconnect" "auto-connect" "$FAKE/log"
+assert_no_line "same buds: no disconnect" "^earctl disconnect" "$FAKE/log"
+
+# Lower-case input is the same buds.
+log_reset
+wrap --address "${A,,}" status >/dev/null
+assert_no_line "lower-case address: no reconnect" "auto-connect" "$FAKE/log"
+
+# Setters land on the buds asked for.
+log_reset
+out=$(wrap --address "$B" set anc off)
+assert_line "set on B moved the session first" "auto-connect --bluetooth-address $B" "$FAKE/log"
+assert_eq "set on B: reply about B" "$(echo "$out" | /usr/bin/jq -r .address)" "$B"
+log_reset
+out=$(wrap --address "$A" cycle)
+assert_line "cycle on A moved the session first" "auto-connect --bluetooth-address $A" "$FAKE/log"
+
+# Disconnecting buds that do not hold the session leaves it alone.
+log_reset
+wrap --address "$B" disconnect >/dev/null
+assert_no_line "disconnect B: A's session kept" "^earctl disconnect" "$FAKE/log"
+assert_eq "disconnect B: earctl still on A" "$(/usr/bin/cat "$FAKE/last-address")" "$A"
+assert_eq "disconnect B: B link down" "$(/usr/bin/cat "$MD/conn-$B")" "no"
+log_reset
+wrap --address "$A" disconnect >/dev/null
+assert_line "disconnect A: its session dropped" "^earctl disconnect" "$FAKE/log"
+echo yes >"$MD/conn-$A"
+echo yes >"$MD/conn-$B"
+
+# select: remembered, wins over the connected-first default, validated.
+out=$(wrap select "${A,,}")
+assert_rc "select A" 0 "$?"
+assert_eq "selected stored uppercased" "$(/usr/bin/cat "$SD/selected")" "$A"
+assert_eq "list reports the pick" "$(echo "$out" | /usr/bin/jq -r .selected)" "$A"
+out=$(wrap status)
+assert_eq "pick wins without --address" "$(echo "$out" | /usr/bin/jq -r .address)" "$A"
+out=$(wrap --address "$B" status)
+assert_eq "--address still wins over the pick" "$(echo "$out" | /usr/bin/jq -r .address)" "$B"
+echo "$B" >"$H/.config/earbuds/address"
+out=$(wrap status)
+assert_eq "pick wins over the config file" "$(echo "$out" | /usr/bin/jq -r .address)" "$A"
+assert_eq "list reports the config address" "$(wrap list | /usr/bin/jq -r .config)" "$B"
+/usr/bin/rm -f -- "$H/.config/earbuds/address"
+# The config file is a default: it loses to connected buds while its own
+# are not connected, and wins while they are.
+wrap select none >/dev/null
+echo "$A" >"$H/.config/earbuds/address"
+echo no >"$MD/conn-$A"
+assert_eq "config buds disconnected: connected ones win" "$(wrap status | /usr/bin/jq -r .address)" "$B"
+echo yes >"$MD/conn-$A"
+echo "$B" >"$H/.config/earbuds/address"
+assert_eq "config buds connected: they win over the first listed" "$(wrap status | /usr/bin/jq -r .address)" "$B"
+echo no >"$MD/conn-$A"
+echo no >"$MD/conn-$B"
+assert_eq "nothing connected: config buds" "$(wrap status | /usr/bin/jq -r .address)" "$B"
+echo yes >"$MD/conn-$A"
+echo yes >"$MD/conn-$B"
+/usr/bin/rm -f -- "$H/.config/earbuds/address"
+wrap select "$A" >/dev/null
+wrap select 'AA:BB;rm -rf' >/dev/null 2>&1
+assert_rc "select refuses a malformed address" 64 "$?"
+assert_eq "malformed pick not stored" "$(/usr/bin/cat "$SD/selected")" "$A"
+# A pick for buds no longer paired falls through to the connected ones.
+echo "11:22:33:44:55:77" >"$SD/selected"
+echo no >"$MD/conn-$A"
+out=$(wrap status)
+assert_eq "stale pick ignored" "$(echo "$out" | /usr/bin/jq -r .address)" "$B"
+echo yes >"$MD/conn-$A"
+out=$(wrap select none)
+assert_rc "select none" 0 "$?"
+assert_gone "pick forgotten" "$SD/selected"
+echo "keep" >"$T/sel-victim"
+/usr/bin/ln -s -- "$T/sel-victim" "$SD/selected"
+wrap select "$A" >/dev/null 2>&1
+assert_rc "select refuses a symlink" 1 "$?"
+assert_eq "symlink target untouched" "$(/usr/bin/cat "$T/sel-victim")" "keep"
+wrap select none >/dev/null 2>&1
+assert_rc "select none refuses a symlink" 1 "$?"
+/usr/bin/rm -f -- "$SD/selected"
+
+# Channels are per address: A's discovered channel never leaks to B.
+/usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address"
+echo 15 >"$FAKE/works-on-channel"
+out=$(wrap --address "$A" discover-channel 2>/dev/null)
+assert_eq "A: channel 15 found" "$(echo "$out" | /usr/bin/jq -r .channel)" "15"
+assert_eq "A: saved under its address" "$(/usr/bin/cat "$SD/channels/${A//:/_}")" "15"
+assert_gone "B: nothing saved" "$SD/channels/${B//:/_}"
+/usr/bin/rm -f -- "$FAKE/works-on-channel"
+log_reset
+wrap --address "$B" status >/dev/null
+assert_line "B: default channel" "--bluetooth-address $B --channel 16" "$FAKE/log"
+log_reset
+wrap --address "$A" status >/dev/null
+assert_line "A: its own channel, session moved back" "--bluetooth-address $A --channel 15" "$FAKE/log"
+# Same buds on another channel is another session too.
+echo 12 >"$H/.config/earbuds/channel"
+log_reset
+wrap --address "$A" status >/dev/null
+assert_line "pinned channel change reopens the session" "--bluetooth-address $A --channel 12" "$FAKE/log"
+/usr/bin/rm -f -- "$H/.config/earbuds/channel"
+# The 0.0.8 single channel file still serves buds with none of their own.
+echo 13 >"$SD/channel"
+log_reset
+wrap --address "$B" status >/dev/null
+assert_line "legacy channel file as fallback" "--bluetooth-address $B --channel 13" "$FAKE/log"
+log_reset
+wrap --address "$A" status >/dev/null
+assert_line "per-address file beats the legacy one" "--bluetooth-address $A --channel 15" "$FAKE/log"
+
+# Codec: only these buds' sink, even when another is listed first.
+cat >"$FAKE/pactl-sinks" <<EOF
+Sink #1
+	Name: bluez_output.${B//:/_}.1
+		api.bluez5.codec = "aac"
+Sink #2
+	Name: bluez_output.${A//:/_}.1
+		api.bluez5.codec = "ldac"
+EOF
+assert_eq "codec of A, not B's" "$(wrap --address "$A" codec | /usr/bin/jq -r .codec)" "ldac"
+assert_eq "codec of B" "$(wrap --address "$B" codec | /usr/bin/jq -r .codec)" "aac"
+/usr/bin/rm -f -- "$FAKE/pactl-sinks"
+
+# Uninstall takes the pick and every per-address channel with it.
+wrap select "$B" >/dev/null
+assert_exists "pick before uninstall" "$SD/selected"
+log_reset
+run_uninstall --yes
+assert_rc "uninstall after multi-device use" 0 "$?"
+assert_gone "pick removed" "$SD/selected"
+assert_gone "channels removed" "$SD/channels"
+assert_gone "state dir removed" "$SD"
+/usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address"
 
 # ------------------------------------------------------------------ verdict
 
