@@ -72,9 +72,10 @@ Panel {
 
   // The wrapper takes overrides as arguments, never as environment. The
   // active address always goes along, so the wrapper never picks other buds.
-  function cmd(args) {
+  function cmd(args) { return cmdFor(activeAddress, args) }
+  function cmdFor(address, args) {
     var out = [earbudsBin]
-    if (activeAddress !== "") out.push("--address", activeAddress)
+    if (address !== "") out.push("--address", address)
     if (channelValid) out.push("--channel", String(cfgChannel))
     return out.concat(args)
   }
@@ -181,7 +182,7 @@ Panel {
     for (var i = 0; i < btDevices.length; i++) {
       var d = btDevices[i]
       if (!d || !(d.paired || d.bonded || d.trusted)) continue
-      if (!/nothing|(^|\s)cmf|ear \(|buds/i.test(String(d.name || ""))) continue
+      if (!/nothing|(^|\s)cmf|ear \(/i.test(String(d.name || ""))) continue
       if (d.connected === true) conn.push(d)
       else rest.push(d)
     }
@@ -265,10 +266,12 @@ Panel {
   // Another device is another session: drop everything in flight or shown
   // for the old one. Replies still on their way are refused by apply().
   onActiveAddressChanged: {
-    var ps = [statusProc, setProc, ringProc, unringProc, latencyProc, inEarProc,
+    // The tone does not stop on its own, and the session is about to leave
+    // the buds playing it.
+    if (ringTimer.running) root.stopRing()
+    var ps = [statusProc, setProc, ringProc, latencyProc, inEarProc,
               superMicProc, bassProc, spatialProc, codecProc, discoverProc]
     for (var i = 0; i < ps.length; i++) ps[i].stop()
-    ringTimer.stop()
     root.ringConfirmOpen = false
     root.busy = false
     root.discovering = false
@@ -450,9 +453,13 @@ Panel {
     root.ringConfirmOpen = false
   }
 
+  // The buds the running tone was sent to, so a switch can still stop it.
+  property string ringingAddress: ""
+
   function ring() {
     root.ringConfirmOpen = false
     if (!root.connected) return
+    root.ringingAddress = root.activeAddress
     ringProc.start(root.cmd(["ring"]))
     ringTimer.restart()
   }
@@ -466,7 +473,7 @@ Panel {
   function stopRing() {
     root.ringConfirmOpen = false
     ringTimer.stop()
-    unringProc.start(root.cmd(["unring"]))
+    unringProc.start(root.cmdFor(root.ringingAddress, ["unring"]))
   }
 
   function setLink(on) {

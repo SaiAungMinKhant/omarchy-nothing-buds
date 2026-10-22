@@ -55,7 +55,7 @@ NB_CONF_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/earbuds
 
 # Names that look like a Nothing or CMF product. Panel.qml carries the same
 # pattern, so both pick the same buds.
-NB_NAME_RE='nothing|[[:space:]]cmf|ear \(|buds'
+NB_NAME_RE='nothing|[[:space:]]cmf|ear \('
 
 # Known channels first, then the range the README probes by hand.
 # 16: CMF Buds 2 (B179). 15: Nothing Ear (3) (B173).
@@ -350,10 +350,9 @@ ensure_session() {
   # left over from other buds is dropped and a new one opened.
   local target
   target=$(session_target)
-  if [[ -n $target && $target != "$ADDR $((10#$CHANNEL))" ]]; then
-    $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1 && $NB_SLEEP 0.5
   # Probe with a real read: `session` keeps reporting active after the buds disconnect.
-  elif $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1; then
+  if [[ -z $target || $target == "$ADDR $((10#$CHANNEL))" ]] &&
+    $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get >/dev/null 2>&1; then
     return 0
   fi
 

@@ -996,6 +996,7 @@ case \$1 in
   devices)
     echo "Device $A CMF Buds 2"
     echo "Device 11:22:33:44:55:66 Some Keyboard"
+    echo "Device 11:22:33:44:55:77 Galaxy Buds2 Pro"
     echo "Device $B Nothing Ear (3)" ;;
   connect)    echo yes >"$MD/conn-\$2" ;;
   disconnect) echo no  >"$MD/conn-\$2" ;;

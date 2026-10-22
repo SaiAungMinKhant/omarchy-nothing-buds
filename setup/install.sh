@@ -213,7 +213,7 @@ if ! [[ -r $NB_CONF_DIR/address ]]; then
   # `|| true`: grep exits 1 on no match.
   addrs=$($NB_TIMEOUT 10 "$NB_BT" devices 2>/dev/null |
     $NB_HEAD -c 8192 |
-    $NB_GREP -iE 'nothing|[[:space:]]cmf|ear \(|buds' |
+    $NB_GREP -iE 'nothing|[[:space:]]cmf|ear \(' |
     $NB_HEAD -n 16 |
     $NB_AWK '{print $2}' || true)
   found=()
