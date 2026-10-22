@@ -20,8 +20,8 @@ Buds 2.
 - Audio codec, switched through PipeWire. Switching interrupts playback for a
   few seconds while the link renegotiates.
 - Connect and disconnect the buds from the panel header.
-- Find my buds, on earbuds. It asks first, since the tone is loud enough to hurt a bud
-  still in an ear. The tone stops itself after 8 seconds.
+- Find my buds, on earbuds. It asks first, since the tone is loud enough to
+  hurt a bud still in an ear. The tone stops itself after 8 seconds.
 
 Developed against CMF Buds 2 (B179). Other Nothing and CMF models speak the
 same protocol on a different RFCOMM channel. The panel probes for the right
@@ -71,8 +71,9 @@ installer prints its plan and asks `Proceed? [y/N]` before doing anything. Have 
 and the native build dependencies for earctl available first.
 
 Missing earctl is always built from commit
-`1315bfbf07eb74b946606e30ede2d4290449082f`, upstream master as of
-2026-09-13 with Ear (3), Super Mic, spatial audio and CMF Buds 2 support.
+`e31159c7dffe10765cecedd8da3d4a2ad2f93985`, upstream master as of
+2026-09-27 with Ear (3), Super Mic, spatial audio, CMF Buds 2 and
+Headphone (1) support.
 Setup fetches that exact commit, checks it out detached, verifies HEAD, and
 runs `cargo build --release --locked` so dependency resolution must match the
 committed lockfile. The binary goes into `~/.local/bin/earctl` and the commit

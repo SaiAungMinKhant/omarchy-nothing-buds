@@ -53,8 +53,8 @@ NB_LEGACY_CHANNEL_FILE=$NB_STATE_DIR/channel
 NB_SELECTED_FILE=$NB_STATE_DIR/selected
 NB_CONF_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/earbuds
 
-# Names that look like a Nothing or CMF product. Panel.qml carries the same
-# pattern, so both pick the same buds.
+# Names that look like a Nothing or CMF product. setup/lib.sh and Panel.qml
+# carry the same pattern, so all three pick the same buds.
 NB_NAME_RE='nothing|[[:space:]]cmf|ear \('
 
 # Known channels first, then the range the README probes by hand.
@@ -126,7 +126,7 @@ usage() {
     "  unring                   stop the tone" \
     "  discover-channel         probe RFCOMM channels ${NB_KNOWN_CHANNELS[*]} then 1-$NB_PROBE_MAX for one" \
     "                           that answers; remembers it per address in $NB_CHANNELS_DIR" \
-    "  list                     JSON: the selected address and every paired Nothing or CMF device" \
+    "  list                     JSON: the pick, the config address and every known Nothing or CMF device" \
     "  select <address|none>    remember which buds to control, in $NB_SELECTED_FILE" \
     "  anything else            passed straight to earctl" \
     "" \
@@ -197,12 +197,14 @@ bt_info_of() {
   $NB_TIMEOUT --kill-after=2 5 "$NB_BT" info "$1" 2>/dev/null | $NB_HEAD -c 4096
 }
 
+# Whether bluetoothctl info for $1 says "$2: yes" (Paired, Connected).
+bt_is() { [[ $(bt_info_of "$1") == *"$2: yes"* ]]; }
+
 # First connected candidate, else $1 when given, else the first paired
 # one, else the first seen.
 detect_addr() {
   local fallback=${1:-} a name info first="" paired=""
   while IFS=$'\t' read -r a name; do
-    [[ -n $a ]] || continue
     [[ -n $first ]] || first=$a
     info=$(bt_info_of "$a")
     if [[ $info == *"Connected: yes"* ]]; then
@@ -220,14 +222,14 @@ if [[ -n ${addr_arg:-} ]]; then
 else
   ADDR=$(read_addr_file "$NB_SELECTED_FILE")
   # A pick for buds that were since removed falls through.
-  if [[ -n $ADDR && $(bt_info_of "$ADDR") != *"Paired: yes"* ]]; then
+  if [[ -n $ADDR ]] && ! bt_is "$ADDR" Paired; then
     ADDR=""
   fi
   # The config file names a default, not a lock: other buds that are
   # connected while it is not take over.
   if [[ -z $ADDR ]]; then
     conf_addr=$(read_addr_file "$NB_CONF_DIR/address")
-    if [[ -n $conf_addr && $(bt_info_of "$conf_addr") == *"Connected: yes"* ]]; then
+    if [[ -n $conf_addr ]] && bt_is "$conf_addr" Connected; then
       ADDR=$conf_addr
     else
       ADDR=$(detect_addr "$conf_addr")
@@ -269,12 +271,8 @@ else
     CHANNEL_SOURCE=config
   else
     [[ -z $NB_FOUND_CHANNEL_FILE ]] || read_channel_file "$NB_FOUND_CHANNEL_FILE" CHANNEL
-    if [[ -n $CHANNEL ]]; then
-      CHANNEL_SOURCE=discovered
-    else
-      read_channel_file "$NB_LEGACY_CHANNEL_FILE" CHANNEL
-      [[ -z $CHANNEL ]] || CHANNEL_SOURCE=discovered
-    fi
+    [[ -n $CHANNEL ]] || read_channel_file "$NB_LEGACY_CHANNEL_FILE" CHANNEL
+    [[ -z $CHANNEL ]] || CHANNEL_SOURCE=discovered
   fi
 fi
 [[ -n $CHANNEL ]] || CHANNEL=${NB_KNOWN_CHANNELS[0]}
@@ -311,12 +309,7 @@ fi
 
 # ------------------------------------------------------------------ BlueZ
 
-# No grep -q: quitting early breaks the pipe and pipefail turns a match into a failure.
-bt_info() { bt_info_of "$ADDR"; }
-
-bt_connected() { bt_info | $NB_GREP "Connected: yes" >/dev/null; }
-bt_paired()   { bt_info | $NB_GREP "Paired: yes" >/dev/null; }
-bt_name()     { bt_info | $NB_SED -n 's/^[[:space:]]*Name: //p' | $NB_HEAD -n 1; }
+bt_name() { bt_info_of "$ADDR" | $NB_SED -n 's/^[[:space:]]*Name: //p' | $NB_HEAD -n 1; }
 
 # ----------------------------------------------------------------- session
 
@@ -433,34 +426,34 @@ codec_set() {
 # `connected: false` is a normal state, not an error.
 cmd_status() {
   local paired=false name
-  bt_paired && paired=true
+  bt_is "$ADDR" Paired && paired=true
   name=$(bt_name)
   [[ -n $name ]] || name="Earbuds"
-
-  if [[ -z $EARCTL ]] || ! bt_connected || ! ensure_session; then
-    $NB_JQ -cn --arg n "$name" --argjson p "$paired" --arg a "$ADDR" '{connected:false, paired:$p, name:$n, address:$a}'
-    return 0
-  fi
 
   # Six round trips, about 0.1s each. A bad read is absent, not fatal.
   # The last two are model-gated. A model without them refuses in a few
   # ms and the field stays null, so the panel omits that control.
-  local anc battery latency inear bass supermic base
-  anc=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_HEAD -c 8192)
-  battery=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192)
-  latency=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency get 2>/dev/null | $NB_HEAD -c 8192)
-  inear=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear get 2>/dev/null | $NB_HEAD -c 8192)
-  bass=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass get 2>/dev/null | $NB_HEAD -c 8192)
-  supermic=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic get 2>/dev/null | $NB_HEAD -c 8192)
-  base=$(model_base)
+  local anc="" battery="" latency="" inear="" bass="" supermic="" base=""
+  if [[ -n $EARCTL ]] && bt_is "$ADDR" Connected && ensure_session; then
+    anc=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc get 2>/dev/null | $NB_HEAD -c 8192)
+    battery=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" battery 2>/dev/null | $NB_HEAD -c 8192)
+    latency=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency get 2>/dev/null | $NB_HEAD -c 8192)
+    inear=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear get 2>/dev/null | $NB_HEAD -c 8192)
+    bass=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass get 2>/dev/null | $NB_HEAD -c 8192)
+    supermic=$($NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic get 2>/dev/null | $NB_HEAD -c 8192)
+    base=$(model_base)
+  fi
 
+  # Not linked, no session, or no ANC level and battery: not connected.
   # earctl serializes AncLevel as a JSON string, not an object.
-  $NB_JQ -e 'type == "string" and
-    (. == "off" or . == "transparency" or . == "noise_cancellation_low" or
-     . == "noise_cancellation_mid" or . == "noise_cancellation_high" or
-     . == "noise_cancellation_adaptive")' >/dev/null 2>&1 <<<"$anc" &&
-    valid_json "$battery" ||
-    { $NB_JQ -cn --arg n "$name" --argjson p "$paired" --arg a "$ADDR" '{connected:false, paired:$p, name:$n, address:$a}'; return 0; }
+  if ! { [[ -n $anc ]] && $NB_JQ -e 'type == "string" and
+      (. == "off" or . == "transparency" or . == "noise_cancellation_low" or
+       . == "noise_cancellation_mid" or . == "noise_cancellation_high" or
+       . == "noise_cancellation_adaptive")' >/dev/null 2>&1 <<<"$anc" &&
+      valid_json "$battery"; }; then
+    $NB_JQ -cn --arg n "$name" --argjson p "$paired" --arg a "$ADDR" '{connected:false, paired:$p, name:$n, address:$a}'
+    return 0
+  fi
   valid_json "$latency" || latency='{"low_latency_enabled":null}'
   valid_json "$inear" || inear='{"detection_enabled":null}'
   valid_json "$bass" || bass='{"enabled":null,"level":null}'
@@ -518,7 +511,7 @@ cmd_connect() {
   # bluetoothctl returns before the buds are ready; let the link settle.
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    bt_connected && break
+    bt_is "$ADDR" Connected && break
     $NB_SLEEP 0.3
   done
   cmd_status
@@ -593,8 +586,6 @@ cmd_cycle() {
 
 # ------------------------------------------------------------- discovery
 
-# Remember a discovered channel by temp file and rename inside the state
-# dir, never through a symlink. The state dir is ours, so uninstall removes it.
 # Write one line to $2 by temp file and rename inside directory $1, never
 # through a symlink. $1 must already exist as a real directory.
 write_state_line() {
@@ -607,6 +598,7 @@ write_state_line() {
   $NB_MV -f -- "$tmp" "$file" 2>/dev/null || { $NB_RM -f -- "$tmp"; return 1; }
 }
 
+# Remember a discovered channel for this address. channels/ is made on first use.
 save_found_channel() {
   [[ -d $NB_STATE_DIR && ! -L $NB_STATE_DIR ]] || return 1
   [[ ! -L $NB_CHANNELS_DIR ]] || return 1
@@ -629,7 +621,7 @@ cmd_discover() {
     return 0
   fi
   [[ -n $EARCTL ]] || { discover_json false null false "earctl missing"; return 0; }
-  bt_connected || { discover_json false null false "link down"; return 0; }
+  bt_is "$ADDR" Connected || { discover_json false null false "link down"; return 0; }
 
   local -a candidates=("${NB_KNOWN_CHANNELS[@]}")
   local ch c seen
@@ -668,7 +660,6 @@ cmd_discover() {
 cmd_list() {
   local a name info paired connected devices='[]' selected config
   while IFS=$'\t' read -r a name; do
-    [[ -n $a ]] || continue
     info=$(bt_info_of "$a")
     paired=false; [[ $info == *"Paired: yes"* ]] && paired=true
     connected=false; [[ $info == *"Connected: yes"* ]] && connected=true

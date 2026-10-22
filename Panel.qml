@@ -194,7 +194,6 @@ Panel {
       if (String(earbudDevices[i].address || "").toUpperCase() === address) return earbudDevices[i]
     return null
   }
-  function hasDevice(address) { return deviceFor(address) !== null }
 
   // The pick, kept by the wrapper in its state dir (`earbuds select`), and
   // ~/.config/earbuds/address, both read through `earbuds list` at start.
@@ -209,7 +208,7 @@ Panel {
   // known buds qualify past the pin.
   readonly property string activeAddress: {
     if (addrValid) return String(cfgAddress).toUpperCase()
-    if (pickedAddress !== "" && hasDevice(pickedAddress)) return pickedAddress
+    if (pickedAddress !== "" && deviceFor(pickedAddress)) return pickedAddress
     var conf = deviceFor(configAddress)
     if (conf && conf.connected === true) return configAddress
     // earbudDevices lists connected buds first.
@@ -360,7 +359,8 @@ Panel {
   // so `has*` gates whether the control appears at all.
   readonly property bool hasSuperMic: connected && typeof state.super_mic === "boolean"
   // Spatial audio has no getter, so support comes from the model earctl
-  // resolved. Ear (3) and CMF Buds 2 take it; on Ear (3) it excludes bass.
+  // resolved. Ear (3), CMF Buds 2 and Headphone (1) take it; on Ear (3) it
+  // excludes bass.
   readonly property string modelBase: connected && state.model_base ? String(state.model_base) : ""
   readonly property bool hasSpatial: modelBase === "B173" || modelBase === "B179" || modelBase === "B170"
   readonly property bool bassExcludesSpatial: modelBase === "B173"
@@ -525,8 +525,7 @@ Panel {
   }
 
   // Set-only. Reflect the intent locally, since status carries no spatial
-  // field. On Ear (3) enabling spatial clears bass. Mode is one of
-  // "off" | "fixed" | "head_tracking".
+  // field. On Ear (3) enabling spatial clears bass.
   function setSpatial(mode) {
     if (!root.claim(spatialProc)) return
     root.spatialMode = mode

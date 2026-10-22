@@ -107,6 +107,10 @@ assert_eq "earbuds earctl fallback rewritten" \
   "$(/usr/bin/grep -c "^NB_EARCTL_FALLBACK=$FAKE/earctl$" "$SUBJ/earbuds")" "1"
 assert_eq "earbuds pactl rewritten" \
   "$(/usr/bin/grep -c "^NB_PACTL=$FAKE/pactl$" "$SUBJ/earbuds")" "1"
+# The wrapper is installed alone, so it keeps its own copy of the name pattern.
+name_re_line=$(/usr/bin/grep "^NB_NAME_RE=" "$SUBJ/lib.sh")
+assert_eq "earbuds name pattern matches lib.sh" \
+  "$(/usr/bin/grep -cxF -- "$name_re_line" "$SUBJ/earbuds")" "1"
 
 # Stand-in for the 0.0.1 wrapper (its bytes are not in this repo).
 printf '#!/bin/bash\n# legacy wrapper from a pre-manifest release\necho legacy\n' >"$FAKE/legacy-earbuds"
