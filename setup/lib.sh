@@ -34,6 +34,7 @@ NB_EARCTL_COMMIT_FILE=$NB_STATE_DIR/earctl-commit
 
 NB_BT=/usr/bin/bluetoothctl
 NB_JQ=/usr/bin/jq
+NB_PERL=/usr/bin/perl
 NB_SYSTEMCTL=/usr/bin/systemctl
 NB_PACMAN=/usr/bin/pacman
 NB_SUDO=/usr/bin/sudo
@@ -175,20 +176,34 @@ nb_sha_file() {
   printf '%s\n' "${out%% *}"
 }
 
-# Read one line of at most $2 bytes from regular non-symlink $1 into $3.
-# Returns 2 if more bytes follow the line, 1 if unreadable or empty.
+# Reads a one-line file of at most $2 bytes into the variable named $3.
+# Perl opens it once with O_NOFOLLOW|O_NONBLOCK, fstats that descriptor and
+# reads from it with a byte cap, so a symlink, FIFO or device swapped in
+# after any earlier check is refused, never followed or waited on. -T makes
+# perl ignore PERL5OPT/PERL5LIB. Returns 1 when absent, not a regular file or
+# empty; 2 when longer than one line of $2 bytes or holding a NUL.
 nb_read_bounded() {
-  local file=$1 max=$2 var=$3 line extra fd
-  [[ -e $file && ! -L $file && -f $file ]] || return 1
-  exec {fd}<"$file" || return 1
-  IFS= read -r -n "$max" line <&"$fd" || true
-  if IFS= read -r -n 1 extra <&"$fd"; then
-    exec {fd}<&-
-    return 2
-  fi
-  exec {fd}<&-
-  [[ -n $line ]] || return 1
-  printf -v "$var" '%s' "$line"
+  local file=$1 max=$2 var=$3 out rc
+  out=$("$NB_PERL" -T -e '
+    use Fcntl;
+    my ($file, $max) = @ARGV;
+    $max =~ /\A[0-9]+\z/ or exit 1;
+    sysopen(my $fh, $file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY) or exit 1;
+    -f $fh or exit 1;
+    my $buf = "";
+    while (length($buf) < $max + 2) {
+      my $n = sysread($fh, $buf, $max + 2 - length($buf), length($buf));
+      defined $n or exit 1;
+      last if $n == 0;
+    }
+    $buf =~ s/\n\z//;
+    exit 2 if length($buf) > $max || $buf =~ /[\n\0]/;
+    exit 1 if $buf eq "";
+    print $buf;
+  ' -- "$file" "$max")
+  rc=$?
+  (( rc == 0 )) || return "$rc"
+  printf -v "$var" '%s' "$out"
   return 0
 }
 
