@@ -183,7 +183,7 @@ Panel {
   // ---------------------------------------------------------------- devices
   // Every known Nothing or CMF device, connected ones first. Known as the
   // Bluetooth panel counts it: paired, bonded or trusted, since Quickshell can
-  // report a bonded device as unpaired. The name test is the wrapper's
+  // report a bonded device as unpaired. The name test matches the wrapper's
   // NB_NAME_RE, so both sides see the same buds.
   readonly property var earbudDevices: {
     var conn = [], rest = []
@@ -1343,7 +1343,6 @@ Panel {
           Row {
             visible: root.connected && root.setupComplete && root.hasSpatial
             width: parent.width
-            // Over-ear adds Head-tracking, so three choices instead of two.
             readonly property int choices: root.hasHeadTracking ? 3 : 2
             readonly property real cellWidth: (width - spacing * (choices - 1)) / choices
             spacing: Style.space(8)

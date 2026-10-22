@@ -183,8 +183,8 @@ earbuds select AA:BB:CC:DD:EE:FF
 earbuds select none             # back to following the connected pair
 ```
 
-Every command checks which buds the earctl session belongs to before it
-reads or writes. A session left on another pair is closed and a new one
+Before it reads or writes the buds, the wrapper checks which buds the earctl
+session belongs to. A session left on another pair is closed and a new one
 opened, so a setting always lands on the buds you see in the panel.
 
 To pin per-widget instead, add keys to this widget's entry in

@@ -14,8 +14,9 @@
 # ear-web will fight this. `ring` wants an interactive y/N.
 #
 # Several paired buds are fine, but earctl holds one session at a time, so
-# only one pair is controlled at once. Every command checks which buds the
-# session is attached to and moves it when that is not $ADDR.
+# only one pair is controlled at once. Each command that talks to the buds
+# checks which buds the session is attached to and moves it when that is
+# not $ADDR.
 #
 # Every external call has a deadline (/usr/bin/timeout) and a byte cap. The
 # inner timeouts do not use --foreground, so each helper gets its own process
@@ -253,11 +254,8 @@ read_channel_file() {
   printf -v "$var" '%s' "$value"
 }
 
-# Discovered channel for this address. Set once ADDR is known.
-NB_FOUND_CHANNEL_FILE=""
-if [[ -n $ADDR ]]; then
-  NB_FOUND_CHANNEL_FILE=$NB_CHANNELS_DIR/${ADDR//:/_}
-fi
+# Discovered channel for this address; empty when no buds resolved.
+NB_FOUND_CHANNEL_FILE=${ADDR:+$NB_CHANNELS_DIR/${ADDR//:/_}}
 
 # CHANNEL_SOURCE tells discover-channel whether a human pinned the channel.
 CHANNEL=""
