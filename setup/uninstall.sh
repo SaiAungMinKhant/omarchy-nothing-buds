@@ -240,6 +240,10 @@ if [[ $manifest_mode == true ]]; then
   # location, not hashed.
   rm_state_file "$NB_STATE_DIR/channel"
   rm_state_file "$NB_STATE_DIR/selected"
+  # Temps from a write that died before its rename.
+  for f in "$NB_STATE_DIR"/.new.*; do
+    [[ -e $f || -L $f ]] && rm_state_file "$f"
+  done
   # One file per address, named AA_BB_CC_DD_EE_FF, plus write temps. Any
   # other name is not ours, but a symlink is still reported.
   chdir=$NB_STATE_DIR/channels

@@ -217,6 +217,11 @@ if [[ -f "__FAKE__/works-on-channel" ]] && [[ $1 == battery || ( $1 == anc && $2
   [[ -f "__FAKE__/last-channel" ]] || exit 1
   [[ $(/usr/bin/cat "__FAKE__/last-channel") == "$(/usr/bin/cat "__FAKE__/works-on-channel")" ]] || exit 1
 fi
+# Flag file: `anc set` takes 2s, then logs which buds the session is on as it lands.
+if [[ $1 == anc && $2 == set && -f "__FAKE__/slow-set" ]]; then
+  /usr/bin/sleep 2
+  echo "anc set landed on $(/usr/bin/cat "__FAKE__/last-address" 2>/dev/null)" >>"__FAKE__/log"
+fi
 case $1 in
   anc)    if [[ $2 == get ]]; then echo '"noise_cancellation_high"'; fi ;;
   battery)
@@ -636,6 +641,44 @@ log_reset
 wrap set spatial sideways >/dev/null 2>&1
 assert_rc "unknown spatial mode refused" 64 "$?"
 assert_no_line "unknown spatial mode not passed on" "spatial-audio" "$FAKE/log"
+assert_no_line "unknown spatial mode opens no session" "^earctl" "$FAKE/log"
+
+# Every value the panel sends reaches earctl as is; anything else stops before earctl.
+for case_ in "anc off|anc set off" "anc transparency|anc set transparency" \
+    "anc nc-low|anc set nc-low" "anc nc-mid|anc set nc-mid" "anc nc-high|anc set nc-high" \
+    "anc adaptive|anc set adaptive" "latency true|latency set true" "in-ear false|in-ear set false" \
+    "super-mic true|super-mic set true" "enhanced-bass true 3|enhanced-bass set --enabled true --level 3" \
+    "enhanced-bass false 5|enhanced-bass set --enabled false --level 5" \
+    "spatial off|spatial-audio off" "spatial fixed|spatial-audio fixed"; do
+  args=${case_%%|*}
+  read -ra set_args <<<"$args"
+  log_reset
+  wrap set "${set_args[@]}" >/dev/null 2>&1
+  assert_rc "set $args accepted" 0 "$?"
+  assert_line "set $args reached earctl" "^earctl ${case_#*|}$" "$FAKE/log"
+done
+for args in "anc" "anc nc-max" "anc high" "latency" "latency yes" "in-ear 1" "super-mic on" \
+    "enhanced-bass true 0" "enhanced-bass true 6" "enhanced-bass maybe 3" "spatial" "spatial on" \
+    "codec" "codec ld\\ac" "volume 11"; do
+  read -ra set_args <<<"$args"
+  log_reset
+  wrap set "${set_args[@]}" >/dev/null 2>&1
+  assert_rc "set $args refused" 64 "$?"
+  assert_no_line "set $args opens no session" "^earctl" "$FAKE/log"
+  assert_no_line "set $args runs no pactl" "^pactl" "$FAKE/log"
+done
+for side in "" left right; do
+  log_reset
+  wrap ring $side >/dev/null 2>&1
+  assert_rc "ring ${side:-both} accepted" 0 "$?"
+  assert_line "ring ${side:-both} reached earctl" "^earctl ring --enable true" "$FAKE/log"
+done
+for side in case LEFT 'left;id' sideways; do
+  log_reset
+  wrap ring "$side" >/dev/null 2>&1
+  assert_rc "ring $side refused" 64 "$?"
+  assert_no_line "ring $side opens no session" "^earctl" "$FAKE/log"
+done
 
 # Hung bluetoothctl that forks a grandchild holding the pipe: timeout signals
 # the whole group, so head sees EOF within the deadline.
@@ -1065,10 +1108,8 @@ echo no >"$MD/conn-$A"
 echo yes >"$MD/conn-$B"
 out=$(wrap list)
 assert_rc "list" 0 "$?"
-assert_eq "list: two buds and the spoofer" "$(echo "$out" | /usr/bin/jq -r '.devices | length')" "3"
-assert_eq "list: keyboard left out" "$(echo "$out" | /usr/bin/jq -r '[.devices[].address] | join(",")')" "$S,$A,$B"
-assert_eq "list: spoofer reported unpaired" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$S\") | .paired")" "false"
-assert_eq "list: spoofer reported not connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$S\") | .connected")" "false"
+assert_eq "list: the two buds, no keyboard, no unpaired spoofer" "$(echo "$out" | /usr/bin/jq -r '[.devices[].address] | join(",")')" "$A,$B"
+assert_line "list: only paired devices asked for" "^bluetoothctl devices Paired$" "$FAKE/log"
 assert_eq "list: B connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$B\") | .connected")" "true"
 assert_eq "list: A not connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$A\") | .connected")" "false"
 assert_eq "list: nothing selected" "$(echo "$out" | /usr/bin/jq -r .selected)" "null"
@@ -1232,13 +1273,35 @@ assert_eq "codec of A, not B's" "$(wrap --address "$A" codec | /usr/bin/jq -r .c
 assert_eq "codec of B" "$(wrap --address "$B" codec | /usr/bin/jq -r .codec)" "aac"
 /usr/bin/rm -f -- "$FAKE/pactl-sinks"
 
-# Uninstall takes the pick and every per-address channel with it.
+# Two wrappers at once for different buds: the second waits its turn
+# rather than moving the session while the first one's write is in flight.
+echo yes >"$MD/conn-$A"
+echo yes >"$MD/conn-$B"
+wrap --address "$A" status >/dev/null
+touch "$FAKE/slow-set"
+log_reset
+wrap --address "$A" set anc off >/dev/null &
+setter=$!
+for i in $(/usr/bin/seq 1 100); do log_has "^earctl anc set" && break; /usr/bin/sleep 0.1; done
+out=$(wrap --address "$B" status)
+wait "$setter"
+assert_rc "first wrapper's set" 0 "$?"
+/usr/bin/rm -f -- "$FAKE/slow-set"
+assert_line "set landed on the buds it was for" "^anc set landed on $A$" "$FAKE/log"
+assert_no_line "set never landed on the other buds" "^anc set landed on $B$" "$FAKE/log"
+assert_eq "second wrapper then read its own buds" "$(echo "$out" | /usr/bin/jq -r '.address + " " + (.connected | tostring)')" "$B true"
+assert_eq "session ends on the second wrapper's buds" "$(/usr/bin/cat "$FAKE/last-address")" "$B"
+
+# Uninstall takes the pick, every per-address channel and any write temp
+# left by a write that died before its rename.
 wrap select "$B" >/dev/null
 assert_exists "pick before uninstall" "$SD/selected"
+echo "$A" >"$SD/.new.dead"
 log_reset
 run_uninstall --yes
 assert_rc "uninstall after multi-device use" 0 "$?"
 assert_gone "pick removed" "$SD/selected"
+assert_gone "dead write temp removed" "$SD/.new.dead"
 assert_gone "channels removed" "$SD/channels"
 assert_gone "state dir removed" "$SD"
 /usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address"

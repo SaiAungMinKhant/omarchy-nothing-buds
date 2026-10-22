@@ -127,7 +127,7 @@ usage() {
     "  unring                   stop the tone" \
     "  discover-channel         probe RFCOMM channels ${NB_KNOWN_CHANNELS[*]} then 1-$NB_PROBE_MAX for one" \
     "                           that answers; remembers it per address in $NB_CHANNELS_DIR" \
-    "  list                     JSON: the pick, the config address and every known Nothing or CMF device" \
+    "  list                     JSON: the pick, the config address and every paired Nothing or CMF device" \
     "  select <address|none>    remember which buds to control, in $NB_SELECTED_FILE" \
     "  anything else            passed straight to earctl" \
     "" \
@@ -181,10 +181,11 @@ read_addr_file() {
   printf '%s' "${value^^}"
 }
 
-# One "ADDRESS<TAB>name" line per known device whose name looks like a
-# Nothing or CMF product, at most 16.
+# One "ADDRESS<TAB>name" line per paired device whose name looks like a
+# Nothing or CMF product, at most 16. Paired only: any device in range can
+# name itself, and a name is the remote's to fill with a forged line.
 candidates() {
-  $NB_TIMEOUT --kill-after=2 10 "$NB_BT" devices 2>/dev/null |
+  $NB_TIMEOUT --kill-after=2 10 "$NB_BT" devices Paired 2>/dev/null |
     $NB_HEAD -c 8192 |
     $NB_GREP -iE "$NB_NAME_RE" |
     $NB_AWK '$1 == "Device" && $2 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ {
@@ -343,10 +344,32 @@ session_target() {
       | "\(.a | ascii_upcase) \(.c)"' 2>/dev/null | $NB_HEAD -c 32
 }
 
+# The panel runs several wrappers at once (the poll, a setter, the unring for
+# buds just switched away from), and earctl has one session. Without a turn
+# each, one moves the session under another, whose write then lands on the
+# wrong buds. The lock is flock on the state dir itself, so there is no lock
+# file to plant or clean up; "dir/." opens only a directory, never a FIFO.
+# It is held until this process and its helpers exit. Without a state dir,
+# so not installed, it runs unlocked.
+NB_LOCK_FD=""
+session_lock() {
+  [[ -z ${NB_LOCK_FD:-} ]] || return 0
+  { exec {NB_LOCK_FD}<"$NB_STATE_DIR/."; } 2>/dev/null || { NB_LOCK_FD=none; return 0; }
+  $NB_TIMEOUT --kill-after=2 15 "$NB_PERL" -T -e '
+    use Fcntl ":flock";
+    $ARGV[0] =~ /\A([0-9]+)\z/ or exit 1;
+    open(my $fh, "<&=", $1) or exit 1;
+    flock($fh, LOCK_EX) or exit 1;
+  ' -- "$NB_LOCK_FD" && return 0
+  printf 'nothing-buds: another earbuds command still holds the earbuds\n' >&2
+  exit 75
+}
+
 ensure_session() {
   # earctl keeps one session. A read only proves that some buds answer, so
   # first make sure the session belongs to these buds on this channel; one
   # left over from other buds is dropped and a new one opened.
+  session_lock
   local target
   target=$(session_target)
   # Probe with a real read: `session` keeps reporting active after the buds disconnect.
@@ -496,8 +519,10 @@ not_connected() { $NB_JQ -cn --arg a "$ADDR" '{connected:false, address:$a}'; }
 
 # `earctl ring` prompts y/N on stdin; a Process from QML has none.
 cmd_ring() {
-  ensure_session || return 1
   local side=${1:-}
+  [[ -z $side || $side == left || $side == right ]] ||
+    { printf 'nothing-buds: ring takes left, right or nothing\n' >&2; return 64; }
+  ensure_session || return 1
   if [[ -n $side ]]; then
     printf 'y\n' | $NB_TIMEOUT --kill-after=2 15 "$EARCTL" ring --enable true --side "$side" >/dev/null 2>&1
   else
@@ -526,6 +551,7 @@ cmd_disconnect() {
   # Drop the session only when it is these buds'; it may belong to others.
   if [[ -n $EARCTL ]]; then
     local target
+    session_lock
     target=$(session_target)
     [[ ${target%% *} != "$ADDR" ]] || $NB_TIMEOUT --kill-after=2 10 "$EARCTL" disconnect >/dev/null 2>&1
   fi
@@ -534,10 +560,20 @@ cmd_disconnect() {
 }
 
 # Named setters so the panel never has to know earctl's argument shapes.
+# Values are checked against what earctl takes before any session opens.
 cmd_set() {
+  local what=${1:-} value=${2:-} level=${3:-2}
+  case $what in
+    anc) [[ $value =~ ^(off|transparency|nc-low|nc-mid|nc-high|adaptive)$ ]] ;;
+    latency|in-ear|super-mic) [[ $value == true || $value == false ]] ;;
+    enhanced-bass) [[ $value =~ ^(true|false)$ && $level =~ ^[1-5]$ ]] ;;
+    spatial) [[ $value =~ ^(off|fixed|head_tracking)$ ]] ;;
+    codec) [[ $value =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]] ;;
+    *) printf 'nothing-buds: unknown setting: %s\n' "$what" >&2; return 64 ;;
+  esac || { printf 'nothing-buds: invalid value for set %s; see --help\n' "$what" >&2; return 64; }
   # Codec is a PipeWire setting, not an earbuds one, so no RFCOMM session is needed.
-  if [[ ${1:-} == codec ]]; then
-    codec_set "${2:-}"
+  if [[ $what == codec ]]; then
+    codec_set "$value"
     cmd_status
     return 0
   fi
@@ -545,25 +581,17 @@ cmd_set() {
     not_connected
     return 0
   fi
-  case ${1:-} in
-    latency) $NB_TIMEOUT --kill-after=2 10 "$EARCTL" latency set "${2:-false}" >/dev/null 2>&1 ;;
-    in-ear)  $NB_TIMEOUT --kill-after=2 10 "$EARCTL" in-ear set "${2:-false}" >/dev/null 2>&1 ;;
-    anc)     $NB_TIMEOUT --kill-after=2 10 "$EARCTL" anc set "${2:-off}" >/dev/null 2>&1 ;;
-    super-mic) $NB_TIMEOUT --kill-after=2 10 "$EARCTL" super-mic set "${2:-false}" >/dev/null 2>&1 ;;
+  case $what in
+    latency|in-ear|anc|super-mic) $NB_TIMEOUT --kill-after=2 10 "$EARCTL" "$what" set "$value" >/dev/null 2>&1 ;;
     enhanced-bass)
       # On Ear (3) bass and spatial audio are exclusive and the second write
       # wins, so clear spatial first. CMF Buds 2 keeps both.
-      [[ ${2:-false} == true && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio off >/dev/null 2>&1
-      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled "${2:-false}" --level "${3:-2}" >/dev/null 2>&1 ;;
+      [[ $value == true && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio off >/dev/null 2>&1
+      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled "$value" --level "$level" >/dev/null 2>&1 ;;
     spatial)
-      case ${2:-off} in
-        off|fixed|head_tracking) ;;
-        *) printf 'unknown spatial mode: %s\n' "$2" >&2; return 64 ;;
-      esac
       # The same the other way round, Ear (3) only.
-      [[ ${2:-off} != off && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled false >/dev/null 2>&1
-      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio "${2:-off}" >/dev/null 2>&1 ;;
-    *)       printf 'unknown setting: %s\n' "${1:-}" >&2; return 64 ;;
+      [[ $value != off && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled false >/dev/null 2>&1
+      $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio "$value" >/dev/null 2>&1 ;;
   esac
   cmd_status
 }
@@ -600,7 +628,9 @@ write_state_line() {
   [[ ! -e $file || -f $file ]] || return 1
   tmp=$($NB_MKTEMP "$dir/.new.XXXXXX") || return 1
   printf '%s\n' "$line" >"$tmp" 2>/dev/null || { $NB_RM -f -- "$tmp"; return 1; }
-  $NB_MV -f -- "$tmp" "$file" 2>/dev/null || { $NB_RM -f -- "$tmp"; return 1; }
+  # -T: a symlink to a directory swapped in since the check is replaced,
+  # and a directory refused, never written into.
+  $NB_MV -fT -- "$tmp" "$file" 2>/dev/null || { $NB_RM -f -- "$tmp"; return 1; }
 }
 
 # Remember a discovered channel for this address. channels/ is made on first use.
@@ -627,6 +657,7 @@ cmd_discover() {
   fi
   [[ -n $EARCTL ]] || { discover_json false null false "earctl missing"; return 0; }
   bt_is "$ADDR" Connected || { discover_json false null false "link down"; return 0; }
+  session_lock
 
   local -a candidates=("${NB_KNOWN_CHANNELS[@]}")
   local ch c seen
