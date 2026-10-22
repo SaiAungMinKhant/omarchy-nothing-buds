@@ -117,7 +117,8 @@ usage() {
     "  set in-ear <bool>        in-ear detection" \
     "  set super-mic <bool>     case Talk-button mic (Ear (3))" \
     "  set enhanced-bass <bool> [level]   bass enhancement (Ear (3))" \
-    "  set spatial <off|fixed>  spatial audio (Ear (3))" \
+    "  set spatial <off|fixed|head_tracking>" \
+    "                           spatial audio; head_tracking on Headphone (1)" \
     "  set codec <name>         A2DP codec via PipeWire (ldac|aac|sbc_xq|sbc)" \
     "  codec                    JSON: active codec and available list" \
     "  cycle                    off -> transparency -> ANC high -> off" \
@@ -557,8 +558,12 @@ cmd_set() {
       [[ ${2:-false} == true && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio off >/dev/null 2>&1
       $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled "${2:-false}" --level "${3:-2}" >/dev/null 2>&1 ;;
     spatial)
+      case ${2:-off} in
+        off|fixed|head_tracking) ;;
+        *) printf 'unknown spatial mode: %s\n' "$2" >&2; return 64 ;;
+      esac
       # The same the other way round, Ear (3) only.
-      [[ ${2:-off} == fixed && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled false >/dev/null 2>&1
+      [[ ${2:-off} != off && $(model_base) == B173 ]] && $NB_TIMEOUT --kill-after=2 10 "$EARCTL" enhanced-bass set --enabled false >/dev/null 2>&1
       $NB_TIMEOUT --kill-after=2 10 "$EARCTL" spatial-audio "${2:-off}" >/dev/null 2>&1 ;;
     *)       printf 'unknown setting: %s\n' "${1:-}" >&2; return 64 ;;
   esac

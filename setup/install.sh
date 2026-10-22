@@ -37,7 +37,7 @@ trap 'nb_cleanup_build; exit 143' TERM
 
 # Full commit SHA, never a movable tag. This is upstream master as of
 # 2026-09-13: v0.1.2 plus Ear (3), Super Mic, spatial audio and CMF Buds 2.
-earctl_commit=1315bfbf07eb74b946606e30ede2d4290449082f
+earctl_commit=e31159c7dffe10765cecedd8da3d4a2ad2f93985
 
 interactive() { [[ -t 0 && -t 1 ]]; }
 say()  { interactive && printf '\n\033[1m%s\033[0m\n' "$*"; return 0; }

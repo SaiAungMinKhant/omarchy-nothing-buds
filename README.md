@@ -11,15 +11,16 @@ Buds 2.
 - A dot on the bar icon carries the mode. Filled for ANC, hollow for
   transparency, drained when off or disconnected.
 - Noise control: off, transparency, and ANC at low, mid, high or adaptive.
-- Per-bud and case battery. The meter turns urgent below 20% and pulses while
-  charging.
+- Per-bud and case battery, or the one battery of the over-ear Headphone (1).
+  The meter turns urgent below 20% and pulses while charging.
 - Low lag mode and in-ear detection.
-- Ultra bass with five levels, and spatial audio, on CMF Buds 2 and Nothing
-  Ear (3). Super Mic on Ear (3). The panel shows what the model reports.
+- Ultra bass with five levels, and spatial audio, on CMF Buds 2, Nothing
+  Ear (3) and Headphone (1). Head-tracking spatial audio on Headphone (1).
+  Super Mic on Ear (3). The panel shows what the model reports.
 - Audio codec, switched through PipeWire. Switching interrupts playback for a
   few seconds while the link renegotiates.
 - Connect and disconnect the buds from the panel header.
-- Find my buds. It asks first, since the tone is loud enough to hurt a bud
+- Find my buds, on earbuds. It asks first, since the tone is loud enough to hurt a bud
   still in an ear. The tone stops itself after 8 seconds.
 
 Developed against CMF Buds 2 (B179). Other Nothing and CMF models speak the
@@ -210,7 +211,8 @@ Other models listen elsewhere:
 |---|---|---|
 | CMF Buds 2 (B179) | 16 | me |
 | Nothing Ear (3) (B173) | 15 | [@kasemeyer](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/issues/2) |
-| Nothing Ear (a) (B162) | 15 | multi-device testing |
+| Nothing Ear (a) (B162) | 15 | [@coryblische](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/pull/11) |
+| Nothing Headphone (1) (B170) | 15 | [@kasemeyer](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/pull/8) |
 
 A wrong channel does not fail loudly. The link opens and the buds never
 answer. When the panel sees that twice in a row on a live link, it runs

@@ -215,7 +215,10 @@ if [[ -f "__FAKE__/works-on-channel" ]] && [[ $1 == battery || ( $1 == anc && $2
 fi
 case $1 in
   anc)    if [[ $2 == get ]]; then echo '"noise_cancellation_high"'; fi ;;
-  battery) echo '{"left":{"Level":{"percent":80,"charging":false}},"right":{"Level":{"percent":75,"charging":false}},"case":{"Level":{"percent":60,"charging":false}}}' ;;
+  battery)
+    if [[ -f "__FAKE__/battery-json" ]]; then /usr/bin/cat "__FAKE__/battery-json"
+    else echo '{"left":{"Level":{"percent":80,"charging":false}},"right":{"Level":{"percent":75,"charging":false}},"case":{"Level":{"percent":60,"charging":false}},"single":"Disconnected"}'
+    fi ;;
   latency) if [[ $2 == get ]]; then echo '{"low_latency_enabled":false}'; fi ;;
   in-ear)  if [[ $2 == get ]]; then echo '{"detection_enabled":true}'; fi ;;
   ring)    /usr/bin/cat >/dev/null ;;
@@ -279,7 +282,7 @@ elif [[ $3 == rev-parse ]]; then
   if [[ -f "$fake/git-wrong-head" ]]; then
     echo 0000000000000000000000000000000000000000
   else
-    echo 1315bfbf07eb74b946606e30ede2d4290449082f
+    echo e31159c7dffe10765cecedd8da3d4a2ad2f93985
   fi
 fi
 EOF
@@ -389,15 +392,15 @@ M=$(manifest_of)
 assert_line "manifest records the binary" "file$(printf '\t')$H/.local/bin/earctl" "$M"
 assert_no_line "no package ownership recorded" "^pkg" "$M"
 assert_no_line "yay never invoked despite being available" "yay" "$FAKE/log"
-assert_line "exact commit fetched" "fetch -q --depth 1 origin 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
-assert_line "detached checkout" "checkout -q --detach 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
+assert_line "exact commit fetched" "fetch -q --depth 1 origin e31159c7dffe10765cecedd8da3d4a2ad2f93985" "$FAKE/log"
+assert_line "detached checkout" "checkout -q --detach e31159c7dffe10765cecedd8da3d4a2ad2f93985" "$FAKE/log"
 assert_line "HEAD verified" "rev-parse HEAD" "$FAKE/log"
 assert_line "locked build through the Cargo proxy" "cargo build --release --locked" "$FAKE/log"
 assert_eq "earctl-bin records built binary" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-bin")" "$H/.local/bin/earctl"
 assert_line "unit uses built binary" "^ExecStart=$H/.local/bin/earctl server" "$H/.config/systemd/user/earctl.service"
 
 step "S5a: a plugin-built earctl from an older pin is rebuilt, a user's is not"
-assert_eq "build commit recorded" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "1315bfbf07eb74b946606e30ede2d4290449082f"
+assert_eq "build commit recorded" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "e31159c7dffe10765cecedd8da3d4a2ad2f93985"
 run_install --check
 assert_rc "check passes on the pinned build" 0 "$?"
 # An install from before 0.0.7 never recorded the build commit at all.
@@ -411,8 +414,8 @@ assert_no_line "no build outside a terminal" "cargo build" "$FAKE/log"
 log_reset
 run_pty install.sh
 assert_rc "terminal setup rebuilds" 0 "$?"
-assert_line "rebuilt from the pin" "fetch -q --depth 1 origin 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
-assert_eq "build commit updated" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "1315bfbf07eb74b946606e30ede2d4290449082f"
+assert_line "rebuilt from the pin" "fetch -q --depth 1 origin e31159c7dffe10765cecedd8da3d4a2ad2f93985" "$FAKE/log"
+assert_eq "build commit updated" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "e31159c7dffe10765cecedd8da3d4a2ad2f93985"
 run_install --check
 assert_rc "check passes after the rebuild" 0 "$?"
 
@@ -613,6 +616,22 @@ assert_eq "ANC string preserved" "$(echo "$out" | /usr/bin/jq -r .anc)" "noise_c
 assert_eq "battery left" "$(echo "$out" | /usr/bin/jq -r .left)" "80"
 assert_eq "battery case" "$(echo "$out" | /usr/bin/jq -r .case)" "60"
 assert_eq "in-ear read" "$(echo "$out" | /usr/bin/jq -r .in_ear)" "true"
+assert_eq "earbuds: no single battery" "$(echo "$out" | /usr/bin/jq -r .single)" "null"
+
+echo '{"left":"Disconnected","right":"Disconnected","case":"Disconnected","single":{"Level":{"percent":64,"charging":true}}}' >"$FAKE/battery-json"
+out=$(wrap status)
+assert_eq "over-ear: single battery" "$(echo "$out" | /usr/bin/jq -r .single)" "64"
+assert_eq "over-ear: charging from the single battery" "$(echo "$out" | /usr/bin/jq -r .charging)" "true"
+assert_eq "over-ear: no left bud" "$(echo "$out" | /usr/bin/jq -r .left)" "null"
+/usr/bin/rm -f -- "$FAKE/battery-json"
+
+log_reset
+wrap set spatial head_tracking >/dev/null
+assert_line "spatial head_tracking reaches earctl" "earctl spatial-audio head_tracking" "$FAKE/log"
+log_reset
+wrap set spatial sideways >/dev/null 2>&1
+assert_rc "unknown spatial mode refused" 64 "$?"
+assert_no_line "unknown spatial mode not passed on" "spatial-audio" "$FAKE/log"
 
 # Hung bluetoothctl that forks a grandchild holding the pipe: timeout signals
 # the whole group, so head sees EOF within the deadline.

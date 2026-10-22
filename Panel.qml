@@ -281,7 +281,7 @@ Panel {
     root.pendingLatency = -1
     root.pendingInEar = -1
     root.pendingBassLevel = 0
-    root.spatialFixed = false
+    root.spatialMode = "off"
     root.silentReads = 0
     root.discoveredThisLink = false
     root.discoverNote = ""
