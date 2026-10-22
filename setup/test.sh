@@ -1213,6 +1213,26 @@ assert_gone "channels removed" "$SD/channels"
 assert_gone "state dir removed" "$SD"
 /usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address"
 
+# The per-address sweep takes only what the wrapper writes: no symlink, no
+# other name.
+new_home
+make_earctl
+run_install --yes >/dev/null 2>&1
+SD=$H/.local/state/io.github.saiaungminkhant.nothing-buds
+/usr/bin/mkdir -p -- "$SD/channels"
+echo 15 >"$SD/channels/${A//:/_}"
+echo 15 >"$SD/channels/.new.x"
+echo "keep" >"$T/chan-victim"
+/usr/bin/ln -s -- "$T/chan-victim" "$SD/channels/${B//:/_}"
+echo "keep" >"$SD/channels/notes"
+run_uninstall --yes >/dev/null 2>&1
+assert_rc "uninstall with foreign channel entries is partial" 6 "$?"
+assert_gone "address-named channel removed" "$SD/channels/${A//:/_}"
+assert_gone "write temp removed" "$SD/channels/.new.x"
+assert_exists "symlinked channel left" "$SD/channels/${B//:/_}"
+assert_eq "symlink target untouched" "$(/usr/bin/cat "$T/chan-victim")" "keep"
+assert_exists "foreign file left" "$SD/channels/notes"
+
 # ------------------------------------------------------------------ verdict
 
 printf '\n'

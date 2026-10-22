@@ -57,8 +57,8 @@ Panel {
   readonly property string cfgAddress: setting("address", "")
   readonly property int cfgChannel: setting("channel", 0)
 
-  readonly property bool addrValid:
-    cfgAddress !== "" && /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(cfgAddress)
+  function isAddress(s) { return /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(s) }
+  readonly property bool addrValid: isAddress(cfgAddress)
   readonly property bool channelValid: cfgChannel >= 1 && cfgChannel <= 63
 
   readonly property string configNotice: {
@@ -110,6 +110,14 @@ Panel {
   readonly property bool shownLatency: pendingLatency >= 0 ? pendingLatency === 1 : lowLatency
   readonly property bool shownInEar: pendingInEar >= 0 ? pendingInEar === 1 : inEar
   readonly property int shownBassLevel: pendingBassLevel > 0 ? pendingBassLevel : bassLevel
+  function clearPending() {
+    root.pendingAnc = ""
+    root.pendingCodec = ""
+    root.pendingLatency = -1
+    root.pendingInEar = -1
+    root.pendingBassLevel = 0
+  }
+
   property string lastError: ""
   // Find asks first: the tone is loud enough to hurt a bud still in an ear.
   property bool ringConfirmOpen: false
@@ -189,9 +197,11 @@ Panel {
     return conn.concat(rest)
   }
 
-  function deviceFor(address) {
-    for (var i = 0; i < earbudDevices.length; i++)
-      if (String(earbudDevices[i].address || "").toUpperCase() === address) return earbudDevices[i]
+  // Addresses are compared upper-case throughout.
+  function addrOf(d) { return String(d.address || "").toUpperCase() }
+  function findDevice(list, address) {
+    for (var i = 0; i < list.length; i++)
+      if (list[i] && addrOf(list[i]) === address) return list[i]
     return null
   }
 
@@ -207,26 +217,20 @@ Panel {
   // then the first paired. The wrapper resolves in the same order. Only
   // known buds qualify past the pin.
   readonly property string activeAddress: {
-    if (addrValid) return String(cfgAddress).toUpperCase()
-    if (pickedAddress !== "" && deviceFor(pickedAddress)) return pickedAddress
-    var conf = deviceFor(configAddress)
+    if (addrValid) return cfgAddress.toUpperCase()
+    if (pickedAddress !== "" && findDevice(earbudDevices, pickedAddress)) return pickedAddress
+    var conf = findDevice(earbudDevices, configAddress)
     if (conf && conf.connected === true) return configAddress
     // earbudDevices lists connected buds first.
-    var first = earbudDevices.length > 0 ? earbudDevices[0] : null
-    if (first && first.connected === true) return String(first.address || "").toUpperCase()
+    var first = earbudDevices[0]
+    if (first && first.connected === true) return addrOf(first)
     if (conf) return configAddress
-    return first ? String(first.address || "").toUpperCase() : ""
+    return first ? addrOf(first) : ""
   }
 
-  readonly property var btDevice: {
-    var wanted = root.activeAddress
-    if (wanted === "") return null
-    for (var i = 0; i < btDevices.length; i++) {
-      var d = btDevices[i]
-      if (d && String(d.address || "").toUpperCase() === wanted) return d
-    }
-    return null
-  }
+  // Searched in all of BlueZ's devices: a shell.json pin may name buds that
+  // earbudDevices leaves out.
+  readonly property var btDevice: activeAddress === "" ? null : findDevice(btDevices, activeAddress)
 
   readonly property bool canPick: !addrValid && earbudDevices.length > 1
 
@@ -235,7 +239,7 @@ Panel {
     for (var i = 0; i < earbudDevices.length; i++) {
       var d = earbudDevices[i]
       out.push({
-        value: String(d.address || "").toUpperCase(),
+        value: addrOf(d),
         label: String(d.name || d.address) + (d.connected === true ? "  ·  connected" : "")
       })
     }
@@ -245,7 +249,7 @@ Panel {
   // Picking buds that are not linked links them, so the choice takes effect.
   function pickDevice(address) {
     var a = String(address || "").toUpperCase()
-    if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(a)) return
+    if (!isAddress(a)) return
     root.pickTouched = true
     if (a === root.activeAddress) return
     root.pickedAddress = a
@@ -268,22 +272,15 @@ Panel {
     // The tone does not stop on its own, and the session is about to leave
     // the buds playing it.
     if (ringTimer.running) root.stopRing()
-    var ps = [statusProc, setProc, ringProc, latencyProc, inEarProc,
-              superMicProc, bassProc, spatialProc, codecProc, discoverProc]
+    var ps = root.sessionProcs()
     for (var i = 0; i < ps.length; i++) ps[i].stop()
     root.ringConfirmOpen = false
     root.busy = false
     root.discovering = false
     root.state = ({ connected: false, paired: false })
-    root.pendingAnc = ""
-    root.pendingCodec = ""
-    root.pendingLatency = -1
-    root.pendingInEar = -1
-    root.pendingBassLevel = 0
+    root.clearPending()
     root.spatialMode = "off"
-    root.silentReads = 0
-    root.discoveredThisLink = false
-    root.discoverNote = ""
+    root.forgetDiscovery()
     root.lastError = ""
     root.linkFailed = false
     Qt.callLater(root.refresh)
@@ -309,6 +306,13 @@ Panel {
   property bool discovering: false
   property bool discoveredThisLink: false
   property string discoverNote: ""
+
+  // A new link, or other buds, get a fresh chance at discovery.
+  function forgetDiscovery() {
+    root.silentReads = 0
+    root.discoveredThisLink = false
+    root.discoverNote = ""
+  }
 
   readonly property string silentText:
     discoverNote !== "" ? discoverNote
@@ -364,12 +368,10 @@ Panel {
   readonly property string modelBase: connected && state.model_base ? String(state.model_base) : ""
   readonly property bool hasSpatial: modelBase === "B173" || modelBase === "B179" || modelBase === "B170"
   readonly property bool bassExcludesSpatial: modelBase === "B173"
-  // Head-tracking is over-ear only (Headphone (1)); earbuds are Fixed/Off.
-  readonly property bool hasHeadTracking: modelBase === "B170"
-  // Over-ear (Headphone (1), B170): one battery instead of left/right/case,
-  // and no case, so no find-a-bud tone.
+  // Over-ear (Headphone (1), B170): no case, so no find-a-bud tone.
   readonly property bool isOverEar: modelBase === "B170"
-  readonly property bool hasSingleBattery: connected && typeof state.single === "number"
+  // Head-tracking is over-ear only; earbuds are Fixed/Off.
+  readonly property bool hasHeadTracking: isOverEar
   readonly property bool superMic: connected && state.super_mic === true
   readonly property bool hasEnhancedBass: connected && typeof state.enhanced_bass === "boolean"
   readonly property bool enhancedBass: connected && state.enhanced_bass === true
@@ -410,11 +412,7 @@ Panel {
       if (next && typeof next.address === "string" && root.activeAddress !== ""
           && next.address.toUpperCase() !== root.activeAddress) return
       root.state = next
-      root.pendingAnc = ""
-      root.pendingCodec = ""
-      root.pendingLatency = -1
-      root.pendingInEar = -1
-      root.pendingBassLevel = 0
+      root.clearPending()
       root.lastError = ""
     } catch (e) {
       // Keep the previous reading rather than blanking the pill.
@@ -545,10 +543,16 @@ Panel {
     codecProc.start(root.cmd(["set", "codec", String(name)]))
   }
 
+  // Helpers whose reply is about the active buds; a switch abandons them.
+  // unringProc names its buds and linkProc may be the switch's own connect.
+  function sessionProcs() {
+    return [statusProc, setProc, ringProc, latencyProc, inEarProc,
+            superMicProc, bassProc, spatialProc, codecProc, discoverProc]
+  }
+
   function stopAll() {
-    var ps = [listProc, selectProc, probeProc, earctlProc, bootstrapProc, statusProc, setProc,
-              ringProc, unringProc, linkProc, latencyProc, inEarProc,
-              superMicProc, bassProc, spatialProc, codecProc, discoverProc]
+    var ps = [listProc, selectProc, probeProc, earctlProc, bootstrapProc,
+              unringProc, linkProc].concat(root.sessionProcs())
     for (var i = 0; i < ps.length; i++) ps[i].stop()
   }
 
@@ -559,9 +563,7 @@ Panel {
   // BlueZ said so; ask the wrapper for details now rather than next poll.
   // A new link gets a fresh chance at discovery. A lost one ends a running probe.
   onLinkUpChanged: {
-    root.silentReads = 0
-    root.discoveredThisLink = false
-    root.discoverNote = ""
+    root.forgetDiscovery()
     if (!root.linkUp && root.discovering) {
       discoverProc.stop()
       root.discovering = false
@@ -1251,7 +1253,7 @@ Panel {
 
             // Over-ear reports one battery; earbuds report left/right and,
             // while connected, the case. A permanent "—" would read as broken.
-            readonly property bool single: root.hasSingleBattery
+            readonly property bool single: typeof root.state.single === "number"
             readonly property bool hasCase: typeof root.state.case === "number"
             readonly property int tiles: single ? 1 : (hasCase ? 3 : 2)
             readonly property real tileWidth:
@@ -1329,7 +1331,8 @@ Panel {
             }
           }
 
-          // Laid out as in Nothing X: two round choices, Fixed and Off.
+          // Laid out as in Nothing X: round choices, Fixed and Off, plus
+          // Head-tracking on over-ear.
           PanelSectionHeader {
             visible: root.connected && root.setupComplete && root.hasSpatial
             text: "Spatial audio"
