@@ -36,8 +36,9 @@ trap 'nb_cleanup_build; exit 130' INT
 trap 'nb_cleanup_build; exit 143' TERM
 
 # Full commit SHA, never a movable tag. This is upstream master as of
-# 2026-09-13: v0.1.2 plus Ear (3), Super Mic, spatial audio and CMF Buds 2.
-earctl_commit=1315bfbf07eb74b946606e30ede2d4290449082f
+# 2026-09-27: v0.1.2 plus Ear (3), Super Mic, spatial audio, CMF Buds 2 and
+# Headphone (1).
+earctl_commit=e31159c7dffe10765cecedd8da3d4a2ad2f93985
 
 interactive() { [[ -t 0 && -t 1 ]]; }
 say()  { interactive && printf '\n\033[1m%s\033[0m\n' "$*"; return 0; }
@@ -211,9 +212,9 @@ fi
 # offers a choice, so a pin would only get in the way.
 if ! [[ -r $NB_CONF_DIR/address ]]; then
   # `|| true`: grep exits 1 on no match.
-  addrs=$($NB_TIMEOUT 10 "$NB_BT" devices 2>/dev/null |
+  addrs=$($NB_TIMEOUT --kill-after=2 10 "$NB_BT" devices Paired 2>/dev/null |
     $NB_HEAD -c 8192 |
-    $NB_GREP -iE 'nothing|[[:space:]]cmf|ear \(' |
+    $NB_GREP -iE "$NB_NAME_RE" |
     $NB_HEAD -n 16 |
     $NB_AWK '{print $2}' || true)
   found=()

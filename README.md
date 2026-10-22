@@ -11,16 +11,17 @@ Buds 2.
 - A dot on the bar icon carries the mode. Filled for ANC, hollow for
   transparency, drained when off or disconnected.
 - Noise control: off, transparency, and ANC at low, mid, high or adaptive.
-- Per-bud and case battery. The meter turns urgent below 20% and pulses while
-  charging.
+- Per-bud and case battery, or the one battery of the over-ear Headphone (1).
+  The meter turns urgent below 20% and pulses while charging.
 - Low lag mode and in-ear detection.
-- Ultra bass with five levels, and spatial audio, on CMF Buds 2 and Nothing
-  Ear (3). Super Mic on Ear (3). The panel shows what the model reports.
+- Ultra bass with five levels, and spatial audio, on CMF Buds 2, Nothing
+  Ear (3) and Headphone (1). Head-tracking spatial audio on Headphone (1).
+  Super Mic on Ear (3). The panel shows what the model reports.
 - Audio codec, switched through PipeWire. Switching interrupts playback for a
   few seconds while the link renegotiates.
 - Connect and disconnect the buds from the panel header.
-- Find my buds. It asks first, since the tone is loud enough to hurt a bud
-  still in an ear. The tone stops itself after 8 seconds.
+- Find my buds, on earbuds. It asks first, since the tone is loud enough to
+  hurt a bud still in an ear. The tone stops itself after 8 seconds.
 
 Developed against CMF Buds 2 (B179). Other Nothing and CMF models speak the
 same protocol on a different RFCOMM channel. The panel probes for the right
@@ -70,8 +71,9 @@ installer prints its plan and asks `Proceed? [y/N]` before doing anything. Have 
 and the native build dependencies for earctl available first.
 
 Missing earctl is always built from commit
-`1315bfbf07eb74b946606e30ede2d4290449082f`, upstream master as of
-2026-09-13 with Ear (3), Super Mic, spatial audio and CMF Buds 2 support.
+`e31159c7dffe10765cecedd8da3d4a2ad2f93985`, upstream master as of
+2026-09-27 with Ear (3), Super Mic, spatial audio, CMF Buds 2 and
+Headphone (1) support.
 Setup fetches that exact commit, checks it out detached, verifies HEAD, and
 runs `cargo build --release --locked` so dependency resolution must match the
 committed lockfile. The binary goes into `~/.local/bin/earctl` and the commit
@@ -153,7 +155,7 @@ The wrapper resolves your earbuds' address in this order:
 1. `--address`
 2. the pair picked in the panel, if it is still paired
 3. `~/.config/earbuds/address`, while that pair is connected
-4. the first connected device whose name looks like a Nothing or CMF product
+4. the first paired and connected device whose name looks like a Nothing or CMF product
 5. `~/.config/earbuds/address`
 6. the first paired one
 
@@ -171,7 +173,8 @@ Every paired Nothing or CMF device is listed. When there are two or more, the
 panel shows a picker under the header. The panel controls one pair at a time,
 because earctl keeps a single RFCOMM session. Without a pick it follows the
 pair that is connected. Picking a pair links it if it is not linked, and the
-session moves to it on the next read. The pick is kept in
+session moves to it on the next read. Wrapper commands take turns on the
+session, so a write never lands on the other pair. The pick is kept in
 `~/.local/state/io.github.saiaungminkhant.nothing-buds/selected`, and it
 outranks `~/.config/earbuds/address`, which only names a default. From a terminal:
 
@@ -181,8 +184,8 @@ earbuds select AA:BB:CC:DD:EE:FF
 earbuds select none             # back to following the connected pair
 ```
 
-Every command checks which buds the earctl session belongs to before it
-reads or writes. A session left on another pair is closed and a new one
+Before it reads or writes the buds, the wrapper checks which buds the earctl
+session belongs to. A session left on another pair is closed and a new one
 opened, so a setting always lands on the buds you see in the panel.
 
 To pin per-widget instead, add keys to this widget's entry in
@@ -210,7 +213,8 @@ Other models listen elsewhere:
 |---|---|---|
 | CMF Buds 2 (B179) | 16 | me |
 | Nothing Ear (3) (B173) | 15 | [@kasemeyer](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/issues/2) |
-| Nothing Ear (a) (B162) | 15 | multi-device testing |
+| Nothing Ear (a) (B162) | 15 | [@coryblische](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/pull/11) |
+| Nothing Headphone (1) (B170) | 15 | [@kasemeyer](https://github.com/SaiAungMinKhant/omarchy-nothing-buds/pull/8) |
 
 A wrong channel does not fail loudly. The link opens and the buds never
 answer. When the panel sees that twice in a row on a live link, it runs
@@ -257,7 +261,7 @@ The marketplace review requirements are addressed here:
 | Setup must be an explicit, consented action; no overwriting objects the plugin cannot prove it owns | Setup runs only from the panel's "Set up" click (`--yes`) or a y/N prompt in a terminal. `setup/lib.sh` installs through `nb_install_file`: symlinked targets are refused, pre-existing files are refused unless recorded in the manifest or byte-identical to a version shipped here, replaced files are backed up, and everything is published by atomic rename. The panel only ever probes with `install.sh --check`, which is read-only. `bash setup/test.sh` S1, S6, S7, S9, S15, S16 |
 | Uninstall must remove only what this installation created | A manifest at `~/.local/state/io.github.saiaungminkhant.nothing-buds/` records every file, directory and package created. Removal is hash-checked, symlink-checked, empty-dir-only, and never recurses by inference. Legacy installs get content-matching only. S3, S8, S11, S12 |
 | Helper calls need deadlines and output caps; a hung or noisy helper must not wedge the panel | Every wrapper call is wrapped in `/usr/bin/timeout` with byte caps on consumed output, and each helper runs in its own process group so a forked grandchild dies with it; the panel wraps every operation in `/usr/bin/timeout --kill-after=5 <deadline>`, streams stdout/stderr through capped parsers, and a watchdog plus supersession rules guarantee `busy`/link state always clears. Channel discovery is a fixed list of bounded probes, writes only inside the plugin's own state directory by temp file and rename, and refuses a symlink there. S13, S17 |
-| Executable identity and input boundaries must not be steerable | All binaries are invoked by absolute path; the `EARCTL`/`EARBUDS_ADDR`/`EARBUDS_CHANNEL` overrides are removed; the panel passes overrides as validated arguments; config and state files are opened once with `O_NOFOLLOW\|O_NONBLOCK`, checked with `fstat` on that same descriptor and read with a byte cap, so a swapped-in symlink or FIFO is refused rather than followed or waited on; they are validated against a Bluetooth-address grammar before use. S14 |
+| Executable identity and input boundaries must not be steerable | All binaries are invoked by absolute path; the `EARCTL`/`EARBUDS_ADDR`/`EARBUDS_CHANNEL` overrides are removed; the panel passes overrides as validated arguments; config and state files are opened once with `O_NOFOLLOW\|O_NONBLOCK`, checked with `fstat` on that same descriptor and read with a byte cap, so a swapped-in symlink or FIFO is refused rather than followed or waited on; they are validated against a Bluetooth-address grammar before use. `set` and `ring` values are checked against what earctl accepts before any session opens. S13, S14 |
 
 `setup/test.sh` runs all of this against fakes in a throwaway HOME, with no
 root, no network and no real systemd, and is the evidence for the table above.

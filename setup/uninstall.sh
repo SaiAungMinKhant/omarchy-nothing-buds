@@ -27,6 +27,15 @@ partial=0
 interactive() { [[ -t 0 && -t 1 ]]; }
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 note() { printf '%s\n' "$*"; }
+# A regular file goes; a symlink stays and makes the uninstall partial.
+rm_state_file() {
+  if [[ -L $1 ]]; then
+    nb_err "leaving $1: it is a symlink"
+    partial=1
+  elif [[ -f $1 ]]; then
+    $NB_RM -f -- "$1" 2>/dev/null || partial=1
+  fi
+}
 
 usage() {
   printf '%s\n' \
@@ -229,15 +238,14 @@ if [[ $manifest_mode == true ]]; then
   esac
   # The wrapper's discovered channels and the panel's pick. Ours by
   # location, not hashed.
-  for f in "$NB_STATE_DIR/channel" "$NB_STATE_DIR/selected"; do
-    if [[ -L $f ]]; then
-      nb_err "leaving $f: it is a symlink"
-      partial=1
-    elif [[ -f $f ]]; then
-      $NB_RM -f -- "$f" 2>/dev/null || partial=1
-    fi
+  rm_state_file "$NB_STATE_DIR/channel"
+  rm_state_file "$NB_STATE_DIR/selected"
+  # Temps from a write that died before its rename.
+  for f in "$NB_STATE_DIR"/.new.*; do
+    [[ -e $f || -L $f ]] && rm_state_file "$f"
   done
-  # One file per address, named AA_BB_CC_DD_EE_FF. Anything else is not ours.
+  # One file per address, named AA_BB_CC_DD_EE_FF, plus write temps. Any
+  # other name is not ours, but a symlink is still reported.
   chdir=$NB_STATE_DIR/channels
   if [[ -L $chdir ]]; then
     nb_err "leaving $chdir: it is a symlink"
@@ -246,11 +254,8 @@ if [[ $manifest_mode == true ]]; then
     for f in "$chdir"/* "$chdir"/.new.*; do
       [[ -e $f || -L $f ]] || continue
       name=${f##*/}
-      if [[ -L $f ]]; then
-        nb_err "leaving $f: it is a symlink"
-        partial=1
-      elif [[ -f $f && ( $name =~ ^([0-9A-F]{2}_){5}[0-9A-F]{2}$ || $name == .new.* ) ]]; then
-        $NB_RM -f -- "$f" 2>/dev/null || partial=1
+      if [[ -L $f || $name =~ ^([0-9A-F]{2}_){5}[0-9A-F]{2}$ || $name == .new.* ]]; then
+        rm_state_file "$f"
       fi
     done
     $NB_RMDIR -- "$chdir" 2>/dev/null ||

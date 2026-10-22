@@ -33,12 +33,13 @@ function glyph(connected, anc) {
   return "󰋋"                      // headphones: no processing
 }
 
-// Lowest of the two buds; the case is often absent.
+// Lowest of the two buds, or the one over-ear battery; the case is often absent.
 function lowestBattery(state) {
   if (!state || state.connected !== true) return -1
   var vals = []
   if (typeof state.left === "number") vals.push(state.left)
   if (typeof state.right === "number") vals.push(state.right)
+  if (typeof state.single === "number") vals.push(state.single)
   return vals.length > 0 ? Math.min.apply(null, vals) : -1
 }
 

@@ -107,6 +107,10 @@ assert_eq "earbuds earctl fallback rewritten" \
   "$(/usr/bin/grep -c "^NB_EARCTL_FALLBACK=$FAKE/earctl$" "$SUBJ/earbuds")" "1"
 assert_eq "earbuds pactl rewritten" \
   "$(/usr/bin/grep -c "^NB_PACTL=$FAKE/pactl$" "$SUBJ/earbuds")" "1"
+# The wrapper is installed alone, so it keeps its own copy of the name pattern.
+name_re_line=$(/usr/bin/grep "^NB_NAME_RE=" "$SUBJ/lib.sh")
+assert_eq "earbuds name pattern matches lib.sh" \
+  "$(/usr/bin/grep -cxF -- "$name_re_line" "$SUBJ/earbuds")" "1"
 
 # Stand-in for the 0.0.1 wrapper (its bytes are not in this repo).
 printf '#!/bin/bash\n# legacy wrapper from a pre-manifest release\necho legacy\n' >"$FAKE/legacy-earbuds"
@@ -213,9 +217,17 @@ if [[ -f "__FAKE__/works-on-channel" ]] && [[ $1 == battery || ( $1 == anc && $2
   [[ -f "__FAKE__/last-channel" ]] || exit 1
   [[ $(/usr/bin/cat "__FAKE__/last-channel") == "$(/usr/bin/cat "__FAKE__/works-on-channel")" ]] || exit 1
 fi
+# Flag file: `anc set` takes 2s, then logs which buds the session is on as it lands.
+if [[ $1 == anc && $2 == set && -f "__FAKE__/slow-set" ]]; then
+  /usr/bin/sleep 2
+  echo "anc set landed on $(/usr/bin/cat "__FAKE__/last-address" 2>/dev/null)" >>"__FAKE__/log"
+fi
 case $1 in
   anc)    if [[ $2 == get ]]; then echo '"noise_cancellation_high"'; fi ;;
-  battery) echo '{"left":{"Level":{"percent":80,"charging":false}},"right":{"Level":{"percent":75,"charging":false}},"case":{"Level":{"percent":60,"charging":false}}}' ;;
+  battery)
+    if [[ -f "__FAKE__/battery-json" ]]; then /usr/bin/cat "__FAKE__/battery-json"
+    else echo '{"left":{"Level":{"percent":80,"charging":false}},"right":{"Level":{"percent":75,"charging":false}},"case":{"Level":{"percent":60,"charging":false}},"single":"Disconnected"}'
+    fi ;;
   latency) if [[ $2 == get ]]; then echo '{"low_latency_enabled":false}'; fi ;;
   in-ear)  if [[ $2 == get ]]; then echo '{"detection_enabled":true}'; fi ;;
   ring)    /usr/bin/cat >/dev/null ;;
@@ -279,7 +291,7 @@ elif [[ $3 == rev-parse ]]; then
   if [[ -f "$fake/git-wrong-head" ]]; then
     echo 0000000000000000000000000000000000000000
   else
-    echo 1315bfbf07eb74b946606e30ede2d4290449082f
+    echo e31159c7dffe10765cecedd8da3d4a2ad2f93985
   fi
 fi
 EOF
@@ -389,15 +401,15 @@ M=$(manifest_of)
 assert_line "manifest records the binary" "file$(printf '\t')$H/.local/bin/earctl" "$M"
 assert_no_line "no package ownership recorded" "^pkg" "$M"
 assert_no_line "yay never invoked despite being available" "yay" "$FAKE/log"
-assert_line "exact commit fetched" "fetch -q --depth 1 origin 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
-assert_line "detached checkout" "checkout -q --detach 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
+assert_line "exact commit fetched" "fetch -q --depth 1 origin e31159c7dffe10765cecedd8da3d4a2ad2f93985" "$FAKE/log"
+assert_line "detached checkout" "checkout -q --detach e31159c7dffe10765cecedd8da3d4a2ad2f93985" "$FAKE/log"
 assert_line "HEAD verified" "rev-parse HEAD" "$FAKE/log"
 assert_line "locked build through the Cargo proxy" "cargo build --release --locked" "$FAKE/log"
 assert_eq "earctl-bin records built binary" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-bin")" "$H/.local/bin/earctl"
 assert_line "unit uses built binary" "^ExecStart=$H/.local/bin/earctl server" "$H/.config/systemd/user/earctl.service"
 
 step "S5a: a plugin-built earctl from an older pin is rebuilt, a user's is not"
-assert_eq "build commit recorded" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "1315bfbf07eb74b946606e30ede2d4290449082f"
+assert_eq "build commit recorded" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "e31159c7dffe10765cecedd8da3d4a2ad2f93985"
 run_install --check
 assert_rc "check passes on the pinned build" 0 "$?"
 # An install from before 0.0.7 never recorded the build commit at all.
@@ -411,8 +423,8 @@ assert_no_line "no build outside a terminal" "cargo build" "$FAKE/log"
 log_reset
 run_pty install.sh
 assert_rc "terminal setup rebuilds" 0 "$?"
-assert_line "rebuilt from the pin" "fetch -q --depth 1 origin 1315bfbf07eb74b946606e30ede2d4290449082f" "$FAKE/log"
-assert_eq "build commit updated" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "1315bfbf07eb74b946606e30ede2d4290449082f"
+assert_line "rebuilt from the pin" "fetch -q --depth 1 origin e31159c7dffe10765cecedd8da3d4a2ad2f93985" "$FAKE/log"
+assert_eq "build commit updated" "$(/usr/bin/cat "$H/.local/state/io.github.saiaungminkhant.nothing-buds/earctl-commit")" "e31159c7dffe10765cecedd8da3d4a2ad2f93985"
 run_install --check
 assert_rc "check passes after the rebuild" 0 "$?"
 
@@ -613,6 +625,60 @@ assert_eq "ANC string preserved" "$(echo "$out" | /usr/bin/jq -r .anc)" "noise_c
 assert_eq "battery left" "$(echo "$out" | /usr/bin/jq -r .left)" "80"
 assert_eq "battery case" "$(echo "$out" | /usr/bin/jq -r .case)" "60"
 assert_eq "in-ear read" "$(echo "$out" | /usr/bin/jq -r .in_ear)" "true"
+assert_eq "earbuds: no single battery" "$(echo "$out" | /usr/bin/jq -r .single)" "null"
+
+echo '{"left":"Disconnected","right":"Disconnected","case":"Disconnected","single":{"Level":{"percent":64,"charging":true}}}' >"$FAKE/battery-json"
+out=$(wrap status)
+assert_eq "over-ear: single battery" "$(echo "$out" | /usr/bin/jq -r .single)" "64"
+assert_eq "over-ear: charging from the single battery" "$(echo "$out" | /usr/bin/jq -r .charging)" "true"
+assert_eq "over-ear: no left bud" "$(echo "$out" | /usr/bin/jq -r .left)" "null"
+/usr/bin/rm -f -- "$FAKE/battery-json"
+
+log_reset
+wrap set spatial head_tracking >/dev/null
+assert_line "spatial head_tracking reaches earctl" "earctl spatial-audio head_tracking" "$FAKE/log"
+log_reset
+wrap set spatial sideways >/dev/null 2>&1
+assert_rc "unknown spatial mode refused" 64 "$?"
+assert_no_line "unknown spatial mode not passed on" "spatial-audio" "$FAKE/log"
+assert_no_line "unknown spatial mode opens no session" "^earctl" "$FAKE/log"
+
+# Every value the panel sends reaches earctl as is; anything else stops before earctl.
+for case_ in "anc off|anc set off" "anc transparency|anc set transparency" \
+    "anc nc-low|anc set nc-low" "anc nc-mid|anc set nc-mid" "anc nc-high|anc set nc-high" \
+    "anc adaptive|anc set adaptive" "latency true|latency set true" "in-ear false|in-ear set false" \
+    "super-mic true|super-mic set true" "enhanced-bass true 3|enhanced-bass set --enabled true --level 3" \
+    "enhanced-bass false 5|enhanced-bass set --enabled false --level 5" \
+    "spatial off|spatial-audio off" "spatial fixed|spatial-audio fixed"; do
+  args=${case_%%|*}
+  read -ra set_args <<<"$args"
+  log_reset
+  wrap set "${set_args[@]}" >/dev/null 2>&1
+  assert_rc "set $args accepted" 0 "$?"
+  assert_line "set $args reached earctl" "^earctl ${case_#*|}$" "$FAKE/log"
+done
+for args in "anc" "anc nc-max" "anc high" "latency" "latency yes" "in-ear 1" "super-mic on" \
+    "enhanced-bass true 0" "enhanced-bass true 6" "enhanced-bass maybe 3" "spatial" "spatial on" \
+    "codec" "codec ld\\ac" "volume 11"; do
+  read -ra set_args <<<"$args"
+  log_reset
+  wrap set "${set_args[@]}" >/dev/null 2>&1
+  assert_rc "set $args refused" 64 "$?"
+  assert_no_line "set $args opens no session" "^earctl" "$FAKE/log"
+  assert_no_line "set $args runs no pactl" "^pactl" "$FAKE/log"
+done
+for side in "" left right; do
+  log_reset
+  wrap ring $side >/dev/null 2>&1
+  assert_rc "ring ${side:-both} accepted" 0 "$?"
+  assert_line "ring ${side:-both} reached earctl" "^earctl ring --enable true" "$FAKE/log"
+done
+for side in case LEFT 'left;id' sideways; do
+  log_reset
+  wrap ring "$side" >/dev/null 2>&1
+  assert_rc "ring $side refused" 64 "$?"
+  assert_no_line "ring $side opens no session" "^earctl" "$FAKE/log"
+done
 
 # Hung bluetoothctl that forks a grandchild holding the pipe: timeout signals
 # the whole group, so head sees EOF within the deadline.
@@ -986,14 +1052,21 @@ assert_no_line "symlinked earctl-bin not followed" "evil-earctl" "$FAKE/log"
 step "S19: several paired buds; the session follows the one asked for"
 A=AA:BB:CC:DD:EE:01
 B=AA:BB:CC:DD:EE:02
+# Seen nearby, never paired, listed first. Its name and alias are the
+# remote's to choose: one says "Connected: yes", the other smuggles property
+# lines in behind a newline. The real lines come last, as bluetoothctl prints them.
+S=11:22:33:44:55:88
 MD=$T/multi
 /usr/bin/mkdir -p -- "$MD"
 # Two buds. Link state per address in $MD/conn-<address>, yes or no.
+# $MD/only-spoof: nothing paired, only the spoofer is known.
 cat >"$FAKE/bluetoothctl" <<EOF
 #!/bin/bash
 echo "bluetoothctl \$*" >> "$FAKE/log"
 case \$1 in
   devices)
+    [[ \$2 == Paired ]] || echo "Device $S Nothing Ear Connected: yes"
+    [[ ! -f "$MD/only-spoof" ]] || exit 0
     echo "Device $A CMF Buds 2"
     echo "Device 11:22:33:44:55:66 Some Keyboard"
     echo "Device 11:22:33:44:55:77 Galaxy Buds2 Pro"
@@ -1004,6 +1077,9 @@ case \$1 in
     case \$2 in
       $A) echo "Name: CMF Buds 2" ;;
       $B) echo "Name: Nothing Ear (3)" ;;
+      $S) printf '\tName: Nothing Ear Connected: yes\n\tAlias: Nothing Ear\n\tPaired: yes\n\tConnected: yes\n'
+          printf '\tPaired: no\n\tConnected: no\n'
+          exit 0 ;;
       *)  exit 1 ;;
     esac
     echo "Paired: yes"
@@ -1032,8 +1108,8 @@ echo no >"$MD/conn-$A"
 echo yes >"$MD/conn-$B"
 out=$(wrap list)
 assert_rc "list" 0 "$?"
-assert_eq "list: two buds" "$(echo "$out" | /usr/bin/jq -r '.devices | length')" "2"
-assert_eq "list: keyboard left out" "$(echo "$out" | /usr/bin/jq -r '[.devices[].address] | join(",")')" "$A,$B"
+assert_eq "list: the two buds, no keyboard, no unpaired spoofer" "$(echo "$out" | /usr/bin/jq -r '[.devices[].address] | join(",")')" "$A,$B"
+assert_line "list: only paired devices asked for" "^bluetoothctl devices Paired$" "$FAKE/log"
 assert_eq "list: B connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$B\") | .connected")" "true"
 assert_eq "list: A not connected" "$(echo "$out" | /usr/bin/jq -r ".devices[] | select(.address == \"$A\") | .connected")" "false"
 assert_eq "list: nothing selected" "$(echo "$out" | /usr/bin/jq -r .selected)" "null"
@@ -1042,6 +1118,24 @@ assert_eq "list: nothing selected" "$(echo "$out" | /usr/bin/jq -r .selected)" "
 out=$(wrap status)
 assert_eq "connected buds chosen over the first listed" "$(echo "$out" | /usr/bin/jq -r .address)" "$B"
 assert_eq "and read" "$(echo "$out" | /usr/bin/jq -r .connected)" "true"
+
+# Nothing connected: the first paired buds, never the spoofer listed first.
+echo no >"$MD/conn-$B"
+assert_eq "spoofer skipped for the first paired buds" "$(wrap status | /usr/bin/jq -r .address)" "$A"
+echo yes >"$MD/conn-$B"
+
+# Nothing paired at all: no session goes to a device that is only a name
+# seen nearby, not even when picked or asked to connect.
+touch "$MD/only-spoof"
+/usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address"
+log_reset
+assert_eq "only the spoofer known: no earbuds found" "$(wrap status | /usr/bin/jq -r .error)" "no earbuds found"
+assert_eq "only the spoofer known: connect finds no earbuds" "$(wrap connect | /usr/bin/jq -r .error)" "no earbuds found"
+wrap select "$S" >/dev/null
+assert_eq "spoofer picked: still no earbuds" "$(wrap status | /usr/bin/jq -r .error)" "no earbuds found"
+assert_no_line "spoofer never linked" "bluetoothctl connect $S" "$FAKE/log"
+assert_no_line "spoofer never given a session" "auto-connect --bluetooth-address $S" "$FAKE/log"
+/usr/bin/rm -f -- "$MD/only-spoof" "$SD/selected"
 
 # The regression: session open on B, then A is asked for. It must move.
 echo yes >"$MD/conn-$A"
@@ -1179,16 +1273,84 @@ assert_eq "codec of A, not B's" "$(wrap --address "$A" codec | /usr/bin/jq -r .c
 assert_eq "codec of B" "$(wrap --address "$B" codec | /usr/bin/jq -r .codec)" "aac"
 /usr/bin/rm -f -- "$FAKE/pactl-sinks"
 
-# Uninstall takes the pick and every per-address channel with it.
+# Two wrappers at once for different buds: the second waits its turn
+# rather than moving the session while the first one's write is in flight.
+echo yes >"$MD/conn-$A"
+echo yes >"$MD/conn-$B"
+wrap --address "$A" status >/dev/null
+touch "$FAKE/slow-set"
+log_reset
+wrap --address "$A" set anc off >/dev/null &
+setter=$!
+for i in $(/usr/bin/seq 1 100); do log_has "^earctl anc set" && break; /usr/bin/sleep 0.1; done
+out=$(wrap --address "$B" status)
+wait "$setter"
+assert_rc "first wrapper's set" 0 "$?"
+/usr/bin/rm -f -- "$FAKE/slow-set"
+assert_line "set landed on the buds it was for" "^anc set landed on $A$" "$FAKE/log"
+assert_no_line "set never landed on the other buds" "^anc set landed on $B$" "$FAKE/log"
+assert_eq "second wrapper then read its own buds" "$(echo "$out" | /usr/bin/jq -r '.address + " " + (.connected | tostring)')" "$B true"
+assert_eq "session ends on the second wrapper's buds" "$(/usr/bin/cat "$FAKE/last-address")" "$B"
+
+# Uninstall takes the pick, every per-address channel and any write temp
+# left by a write that died before its rename.
 wrap select "$B" >/dev/null
 assert_exists "pick before uninstall" "$SD/selected"
+echo "$A" >"$SD/.new.dead"
 log_reset
 run_uninstall --yes
 assert_rc "uninstall after multi-device use" 0 "$?"
 assert_gone "pick removed" "$SD/selected"
+assert_gone "dead write temp removed" "$SD/.new.dead"
 assert_gone "channels removed" "$SD/channels"
 assert_gone "state dir removed" "$SD"
 /usr/bin/rm -f -- "$FAKE/last-channel" "$FAKE/last-address"
+
+# The per-address sweep takes only what the wrapper writes: no symlink, no
+# other name.
+new_home
+make_earctl
+run_install --yes >/dev/null 2>&1
+SD=$H/.local/state/io.github.saiaungminkhant.nothing-buds
+/usr/bin/mkdir -p -- "$SD/channels"
+echo 15 >"$SD/channels/${A//:/_}"
+echo 15 >"$SD/channels/.new.x"
+echo "keep" >"$T/chan-victim"
+/usr/bin/ln -s -- "$T/chan-victim" "$SD/channels/${B//:/_}"
+echo "keep" >"$SD/channels/notes"
+run_uninstall --yes >/dev/null 2>&1
+assert_rc "uninstall with foreign channel entries is partial" 6 "$?"
+assert_gone "address-named channel removed" "$SD/channels/${A//:/_}"
+assert_gone "write temp removed" "$SD/channels/.new.x"
+assert_exists "symlinked channel left" "$SD/channels/${B//:/_}"
+assert_eq "symlink target untouched" "$(/usr/bin/cat "$T/chan-victim")" "keep"
+assert_exists "foreign file left" "$SD/channels/notes"
+
+step "S20: the installer pins only a paired device, and its scan is bounded"
+new_home
+make_earctl
+touch "$MD/only-spoof"
+run_install --yes >/dev/null 2>&1
+assert_rc "install with only a nearby unpaired device" 0 "$?"
+assert_gone "unpaired device not pinned" "$H/.config/earbuds/address"
+/usr/bin/rm -f -- "$MD/only-spoof"
+
+# A bluetoothctl that ignores TERM and keeps spawning: the scan still ends.
+cat >"$FAKE/bluetoothctl" <<'EOF'
+#!/bin/bash
+trap '' TERM
+for i in $(/usr/bin/seq 1 300); do /usr/bin/sleep 1; done
+EOF
+/usr/bin/chmod 755 "$FAKE/bluetoothctl"
+new_home
+make_earctl
+t0=$SECONDS
+env HOME="$H" XDG_CONFIG_HOME="$H/.config" XDG_STATE_HOME="$H/.local/state" \
+  /usr/bin/timeout 60 bash "$SUBJ/install.sh" --yes </dev/null >/dev/null 2>&1
+rc=$?
+cost=$((SECONDS - t0))
+assert_rc "install survives a bluetoothctl that ignores TERM" 0 "$rc"
+if (( cost < 30 )); then ok "scan ended in ${cost}s"; else bad "scan took ${cost}s"; fi
 
 # ------------------------------------------------------------------ verdict
 

@@ -157,6 +157,10 @@ nb_fail() {
   exit "$code"
 }
 
+# Names that look like a Nothing or CMF product, matched against
+# `bluetoothctl devices` lines. setup/earbuds carries the same pattern.
+NB_NAME_RE='nothing|[[:space:]]cmf|ear \('
+
 # ---------------------------------------------------------------- validators
 
 nb_valid_addr() {
